@@ -14,6 +14,9 @@ import {
   FileCode,
   FileArchive,
   File as FileGeneric,
+  Presentation,
+  FileSpreadsheet,
+  BookOpen,
   Eye,
   Download,
   Trash2,
@@ -37,12 +40,24 @@ export default function FileCard({ file, viewMode = 'grid', onDelete, onPreview 
   });
 
   const getCategoryDetails = () => {
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+
+    if (ext === '.ppt' || ext === '.pptx' || file.mime_type.includes('presentation')) {
+      return { icon: <Presentation size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-ppt' };
+    }
+    if (ext === '.xls' || ext === '.xlsx' || ext === '.csv' || ext === '.tsv') {
+      return { icon: <FileSpreadsheet size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-sheet' };
+    }
+    if (ext === '.md' || ext === '.markdown') {
+      return { icon: <BookOpen size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-markdown' };
+    }
+
     switch (category) {
       case 'media':
-        if (file.mime_type.startsWith('video/')) {
+        if (file.mime_type.startsWith('video/') || ['.mp4', '.webm', '.mkv', '.mov'].includes(ext)) {
           return { icon: <Film size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-video' };
         }
-        if (file.mime_type.startsWith('audio/')) {
+        if (file.mime_type.startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.flac'].includes(ext)) {
           return { icon: <Music size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-audio' };
         }
         return { icon: <ImageIcon size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-image' };
@@ -52,7 +67,7 @@ export default function FileCard({ file, viewMode = 'grid', onDelete, onPreview 
         return { icon: <FileArchive size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-archive' };
       case 'docs':
       default:
-        if (file.mime_type === 'application/pdf') {
+        if (file.mime_type === 'application/pdf' || ext === '.pdf') {
           return { icon: <FileText size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-pdf' };
         }
         return { icon: <FileGeneric size={viewMode === 'grid' ? 28 : 20} />, colorClass: 'cat-doc' };
@@ -81,7 +96,7 @@ export default function FileCard({ file, viewMode = 'grid', onDelete, onPreview 
     return (
       <div
         className={`file-row-glass ${colorClass}`}
-        onClick={() => previewType !== 'none' && onPreview(file)}
+        onClick={() => onPreview(file)}
         tabIndex={0}
       >
         <div className="file-row-main">
@@ -102,15 +117,13 @@ export default function FileCard({ file, viewMode = 'grid', onDelete, onPreview 
         </div>
 
         <div className="file-row-actions">
-          {previewType !== 'none' && (
-            <button
-              className="action-btn action-preview"
-              onClick={(e) => { e.stopPropagation(); onPreview(file); }}
-              title="Stream / Preview"
-            >
-              <Eye size={15} />
-            </button>
-          )}
+          <button
+            className="action-btn action-preview"
+            onClick={(e) => { e.stopPropagation(); onPreview(file); }}
+            title="Inspect / Stream / Preview"
+          >
+            <Eye size={15} />
+          </button>
           <button
             className="action-btn action-download"
             onClick={handleDownload}
@@ -133,7 +146,7 @@ export default function FileCard({ file, viewMode = 'grid', onDelete, onPreview 
   return (
     <div
       className={`file-card-glass ${colorClass}`}
-      onClick={() => previewType !== 'none' && onPreview(file)}
+      onClick={() => onPreview(file)}
       role="button"
       tabIndex={0}
     >
@@ -159,16 +172,14 @@ export default function FileCard({ file, viewMode = 'grid', onDelete, onPreview 
       </div>
 
       <div className="file-card-hover-actions">
-        {previewType !== 'none' && (
-          <button
-            className="card-action-btn action-preview"
-            onClick={(e) => { e.stopPropagation(); onPreview(file); }}
-            title="Live Stream / Preview"
-          >
-            <Eye size={15} />
-            <span>View</span>
-          </button>
-        )}
+        <button
+          className="card-action-btn action-preview"
+          onClick={(e) => { e.stopPropagation(); onPreview(file); }}
+          title="Inspect / Live Preview"
+        >
+          <Eye size={15} />
+          <span>View</span>
+        </button>
         <button
           className="card-action-btn action-download"
           onClick={handleDownload}
