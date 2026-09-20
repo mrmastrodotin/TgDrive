@@ -150,6 +150,20 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ForceHTTPSMiddleware redirects all plain HTTP requests to HTTPS with a 301 Permanent Redirect.
+func (s *Server) ForceHTTPSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Detect plain HTTP behind edge proxies (Koyeb, Render, Cloudflare)
+		proto := r.Header.Get("X-Forwarded-Proto")
+		if proto == "http" {
+			target := "https://" + r.Host + r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SecurityHeadersMiddleware adds OWASP defense-in-depth headers.
 func (s *Server) SecurityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

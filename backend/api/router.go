@@ -34,9 +34,9 @@ func NewServer(cfg *config.Config, db *storage.DB, tg *telegram.Client) *Server 
 	return s
 }
 
-// Handler returns the HTTP handler with middleware applied.
+// Handler returns the HTTP handler with full HTTPS and security middleware applied.
 func (s *Server) Handler() http.Handler {
-	return s.SecurityHeadersMiddleware(s.mux)
+	return s.ForceHTTPSMiddleware(s.SecurityHeadersMiddleware(s.mux))
 }
 
 func (s *Server) registerRoutes() {
