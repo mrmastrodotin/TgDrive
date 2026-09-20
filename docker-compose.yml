@@ -1,0 +1,22 @@
+services:
+  tgdrive:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tgdrive
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+    environment:
+      - PORT=8080
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN}
+      - TG_CHANNEL_ID=${TG_CHANNEL_ID}
+      - ENCRYPTION_SECRET=${ENCRYPTION_SECRET}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - DATABASE_PATH=/app/data/tgdrive.db
+      - ALLOWED_ORIGIN=*
+    volumes:
+      - tgdrive_data:/app/data
+
+volumes:
+  tgdrive_data:

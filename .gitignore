@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build artifacts
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+backend/tmp/
+
+# Frontend
+frontend/.vite/
+
+# Database & Certificates
+*.db
+*.pem
+backend/*.db
+backend/*.pem

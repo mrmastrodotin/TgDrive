@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: tgdrive
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: TG_CHANNEL_ID
+        sync: false
+      - key: ENCRYPTION_SECRET_KEY
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: PORT
+        value: 8080
