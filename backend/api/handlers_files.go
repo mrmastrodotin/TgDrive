@@ -13,6 +13,80 @@ import (
 	"tgdrive/crypto"
 )
 
+// detectMimeType returns a precise MIME type for web browsers based on file extension and headers.
+func detectMimeType(filename, headerMime string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	custom := map[string]string{
+		".md":    "text/markdown; charset=utf-8",
+		".py":    "text/x-python; charset=utf-8",
+		".js":    "application/javascript; charset=utf-8",
+		".ts":    "application/typescript; charset=utf-8",
+		".tsx":   "application/typescript; charset=utf-8",
+		".jsx":   "application/javascript; charset=utf-8",
+		".go":    "text/x-go; charset=utf-8",
+		".rs":    "text/rust; charset=utf-8",
+		".c":     "text/x-c; charset=utf-8",
+		".cpp":   "text/x-c++; charset=utf-8",
+		".h":     "text/x-c; charset=utf-8",
+		".java":  "text/x-java-source; charset=utf-8",
+		".json":  "application/json",
+		".yaml":  "text/yaml; charset=utf-8",
+		".yml":   "text/yaml; charset=utf-8",
+		".toml":  "text/toml; charset=utf-8",
+		".xml":   "application/xml",
+		".html":  "text/html; charset=utf-8",
+		".css":   "text/css; charset=utf-8",
+		".scss":  "text/x-scss; charset=utf-8",
+		".sql":   "text/x-sql; charset=utf-8",
+		".sh":    "application/x-sh; charset=utf-8",
+		".bat":   "application/x-bat; charset=utf-8",
+		".ps1":   "text/plain; charset=utf-8",
+		".txt":   "text/plain; charset=utf-8",
+		".csv":   "text/csv; charset=utf-8",
+		".tsv":   "text/tab-separated-values; charset=utf-8",
+		".log":   "text/plain; charset=utf-8",
+		".env":   "text/plain; charset=utf-8",
+		".pdf":   "application/pdf",
+		".png":   "image/png",
+		".jpg":   "image/jpeg",
+		".jpeg":  "image/jpeg",
+		".gif":   "image/gif",
+		".webp":  "image/webp",
+		".svg":   "image/svg+xml",
+		".ico":   "image/x-icon",
+		".mp4":   "video/mp4",
+		".webm":  "video/webm",
+		".mkv":   "video/x-matroska",
+		".mov":   "video/quicktime",
+		".mp3":   "audio/mpeg",
+		".wav":   "audio/wav",
+		".ogg":   "audio/ogg",
+		".flac":  "audio/flac",
+		".m4a":   "audio/mp4",
+		".ppt":   "application/vnd.ms-powerpoint",
+		".pptx":  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		".doc":   "application/msword",
+		".docx":  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		".xls":   "application/vnd.ms-excel",
+		".xlsx":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		".zip":   "application/zip",
+		".tar":   "application/x-tar",
+		".gz":    "application/gzip",
+		".7z":    "application/x-7z-compressed",
+		".rar":   "application/x-rar-compressed",
+	}
+	if ct, ok := custom[ext]; ok {
+		return ct
+	}
+	if headerMime != "" && headerMime != "application/octet-stream" {
+		return headerMime
+	}
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
+}
+
 // HandleUploadFile handles POST /api/files/upload
 func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -43,14 +117,7 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 		folderIDPtr = &folderID
 	}
 
-	mimeType := header.Header.Get("Content-Type")
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		ext := filepath.Ext(header.Filename)
-		mimeType = mime.TypeByExtension(ext)
-		if mimeType == "" {
-			mimeType = "application/octet-stream"
-		}
-	}
+	mimeType := detectMimeType(cleanName, header.Header.Get("Content-Type"))
 
 	salt, err := crypto.GenerateSalt()
 	if err != nil {
@@ -176,7 +243,8 @@ func (s *Server) HandleStreamFile(w http.ResponseWriter, r *http.Request) {
 	masterKey := []byte(s.cfg.MasterKey)
 
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Type", dbFile.MimeType)
+	streamMime := detectMimeType(dbFile.Name, dbFile.MimeType)
+	w.Header().Set("Content-Type", streamMime)
 
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
@@ -334,7 +402,9 @@ func (s *Server) HandlePreviewFile(w http.ResponseWriter, r *http.Request) {
 		chunkMap[c.ChunkIndex] = c.TelegramFileID
 	}
 
-	w.Header().Set("Content-Type", dbFile.MimeType)
+	previewMime := detectMimeType(dbFile.Name, dbFile.MimeType)
+	w.Header().Set("Content-Type", previewMime)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", dbFile.Name))
 	w.Header().Set("Content-Length", strconv.FormatInt(dbFile.Size, 10))
 	w.Header().Set("Accept-Ranges", "bytes")
 
