@@ -122,15 +122,16 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 // AuthMiddleware validates JWT tokens on protected routes.
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenStr := ""
 		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing authorization header"})
-			return
+		if authHeader != "" {
+			tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+		} else if qToken := r.URL.Query().Get("token"); qToken != "" {
+			tokenStr = qToken
 		}
 
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		if tokenStr == authHeader {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid authorization format"})
+		if tokenStr == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing authorization"})
 			return
 		}
 

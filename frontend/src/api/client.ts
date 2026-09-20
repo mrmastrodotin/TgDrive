@@ -124,15 +124,18 @@ export async function uploadFile(
 }
 
 export function getDownloadURL(fileId: string): string {
-  return `${API_BASE}/files/${fileId}/download`;
+  const token = getToken();
+  return token ? `${API_BASE}/files/${fileId}/download?token=${encodeURIComponent(token)}` : `${API_BASE}/files/${fileId}/download`;
 }
 
 export function getStreamURL(fileId: string): string {
-  return `${API_BASE}/files/${fileId}/stream`;
+  const token = getToken();
+  return token ? `${API_BASE}/files/${fileId}/stream?token=${encodeURIComponent(token)}` : `${API_BASE}/files/${fileId}/stream`;
 }
 
 export function getPreviewURL(fileId: string): string {
-  return `${API_BASE}/files/${fileId}/preview`;
+  const token = getToken();
+  return token ? `${API_BASE}/files/${fileId}/preview?token=${encodeURIComponent(token)}` : `${API_BASE}/files/${fileId}/preview`;
 }
 
 export async function downloadFile(fileId: string, filename: string): Promise<void> {

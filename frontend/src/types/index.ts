@@ -30,16 +30,37 @@ export interface LoginResponse {
 
 export type PreviewableType = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'code' | 'none';
 
+export type FileCategory = 'all' | 'media' | 'docs' | 'code' | 'archives';
+
+export function getFileCategory(mimeType: string, filename: string): FileCategory {
+  if (mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/')) {
+    return 'media';
+  }
+  if (mimeType === 'application/pdf' || mimeType.includes('document') || mimeType.includes('word') || mimeType.includes('sheet') || mimeType.includes('presentation')) {
+    return 'docs';
+  }
+  const ext = '.' + filename.split('.').pop()?.toLowerCase();
+  const codeExts = ['.js', '.ts', '.jsx', '.tsx', '.py', '.go', '.rs', '.c', '.cpp', '.h', '.java', '.json', '.yaml', '.yml', '.toml', '.xml', '.html', '.css', '.scss', '.md', '.sql', '.sh', '.bat', '.ps1'];
+  if (codeExts.includes(ext) || mimeType.startsWith('text/')) {
+    return 'code';
+  }
+  const archExts = ['.zip', '.tar', '.gz', '.7z', '.rar', '.bz2', '.iso'];
+  if (archExts.includes(ext) || mimeType.includes('zip') || mimeType.includes('archive') || mimeType.includes('compressed')) {
+    return 'archives';
+  }
+  return 'docs';
+}
+
 export function getPreviewType(mimeType: string, filename: string): PreviewableType {
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType.startsWith('video/')) return 'video';
   if (mimeType.startsWith('audio/')) return 'audio';
   if (mimeType === 'application/pdf') return 'pdf';
-  if (mimeType.startsWith('text/')) return 'text';
 
-  const codeExts = ['.js', '.ts', '.jsx', '.tsx', '.py', '.go', '.rs', '.c', '.cpp', '.h', '.java', '.json', '.yaml', '.yml', '.toml', '.xml', '.html', '.css', '.scss', '.md', '.sql', '.sh', '.bat', '.ps1'];
   const ext = '.' + filename.split('.').pop()?.toLowerCase();
+  const codeExts = ['.js', '.ts', '.jsx', '.tsx', '.py', '.go', '.rs', '.c', '.cpp', '.h', '.java', '.json', '.yaml', '.yml', '.toml', '.xml', '.html', '.css', '.scss', '.md', '.sql', '.sh', '.bat', '.ps1'];
   if (codeExts.includes(ext)) return 'code';
+  if (mimeType.startsWith('text/')) return 'text';
 
   return 'none';
 }
@@ -49,17 +70,4 @@ export function formatFileSize(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-}
-
-export function getFileIcon(mimeType: string): string {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.startsWith('video/')) return '🎬';
-  if (mimeType.startsWith('audio/')) return '🎵';
-  if (mimeType === 'application/pdf') return '📕';
-  if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) return '📊';
-  if (mimeType.includes('document') || mimeType.includes('word')) return '📝';
-  if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return '📽️';
-  if (mimeType.includes('zip') || mimeType.includes('archive') || mimeType.includes('compressed')) return '📦';
-  if (mimeType.startsWith('text/')) return '📄';
-  return '📄';
 }
