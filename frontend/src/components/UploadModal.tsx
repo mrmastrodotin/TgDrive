@@ -1,5 +1,16 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { uploadFile } from '../api/client';
+import { formatFileSize } from '../types';
+import {
+  UploadCloud,
+  X,
+  File,
+  CheckCircle2,
+  AlertCircle,
+  Lock,
+  Plus,
+  ArrowUpRight,
+} from 'lucide-react';
 
 interface UploadModalProps {
   folderId?: string;
@@ -17,6 +28,7 @@ interface UploadItem {
 export default function UploadModal({ folderId, onClose, onUploadComplete }: UploadModalProps) {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = (files: FileList | File[]) => {
@@ -45,7 +57,12 @@ export default function UploadModal({ folderId, onClose, onUploadComplete }: Upl
     }
   }, []);
 
+  const removeFile = (index: number) => {
+    setItems((prev) => prev.filter((_, i) => i !== index));
+  };
+
   const startUpload = async () => {
+    setIsUploading(true);
     for (let i = 0; i < items.length; i++) {
       if (items[i].status !== 'pending') continue;
 
@@ -72,96 +89,147 @@ export default function UploadModal({ folderId, onClose, onUploadComplete }: Upl
       } catch (err: any) {
         setItems((prev) => {
           const next = [...prev];
-          next[i] = { ...next[i], status: 'error', error: err.message };
+          next[i] = {
+            ...next[i],
+            status: 'error',
+            error: err.message || 'Upload failed',
+          };
           return next;
         });
       }
     }
+    setIsUploading(false);
     onUploadComplete();
   };
 
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-  };
-
-  const hasPending = items.some((i) => i.status === 'pending');
-  const allDone = items.length > 0 && items.every((i) => i.status === 'done' || i.status === 'error');
+  const pendingCount = items.filter((i) => i.status === 'pending').length;
+  const completedCount = items.filter((i) => i.status === 'done').length;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h2>Upload Files</h2>
-          <button id="upload-close" className="modal-close" onClick={onClose}>✕</button>
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="upload-modal-glass" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header-bar">
+          <div className="modal-header-info">
+            <h3 className="modal-headline">Upload & Encrypt</h3>
+            <p className="modal-subline">Files are split into 20MB chunks and AES-256 encrypted before transmission</p>
+          </div>
+          <button className="modal-close-btn" onClick={onClose} disabled={isUploading}>
+            <X size={20} />
+          </button>
         </div>
 
+        {/* Drop Zone */}
         <div
-          className={`drop-zone ${isDragging ? 'drop-zone-active' : ''}`}
+          className={`dropzone-glass ${isDragging ? 'dropzone-active' : ''}`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
         >
-          <div className="drop-zone-icon">📂</div>
-          <p className="drop-zone-text">
-            {isDragging ? 'Drop files here' : 'Drag & drop files or click to browse'}
-          </p>
-          <p className="drop-zone-hint">Files are encrypted before upload</p>
           <input
             ref={fileInputRef}
             type="file"
             multiple
-            className="drop-zone-input"
+            className="hidden-file-input"
             onChange={(e) => e.target.files && addFiles(e.target.files)}
           />
+          <div className="dropzone-icon-glow">
+            <UploadCloud size={40} className="upload-cloud-icon" />
+          </div>
+          <h4 className="dropzone-prompt">Drag & Drop files here, or <span className="text-highlight">Browse</span></h4>
+          <p className="dropzone-hint">Supports all file types (4K video, documents, archives, audio, code)</p>
         </div>
 
+        {/* Upload File Queue */}
         {items.length > 0 && (
-          <div className="upload-list">
-            {items.map((item, idx) => (
-              <div key={idx} className="upload-item">
-                <div className="upload-item-info">
-                  <span className="upload-item-name">{item.file.name}</span>
-                  <span className="upload-item-size">{formatSize(item.file.size)}</span>
-                </div>
-                <div className="upload-item-progress">
-                  <div className="progress-bar">
-                    <div
-                      className={`progress-fill ${item.status === 'error' ? 'progress-error' : ''} ${item.status === 'done' ? 'progress-done' : ''}`}
-                      style={{ width: `${item.progress}%` }}
-                    ></div>
+          <div className="upload-queue-container">
+            <div className="queue-header">
+              <span className="queue-title">Selected Files ({items.length})</span>
+              <span className="queue-status-text">
+                {completedCount} of {items.length} uploaded
+              </span>
+            </div>
+
+            <div className="queue-list-scroll">
+              {items.map((item, index) => {
+                const chunksEst = Math.max(1, Math.ceil(item.file.size / (20 * 1024 * 1024)));
+                return (
+                  <div key={index} className={`queue-card ${item.status}`}>
+                    <div className="queue-card-top">
+                      <div className="queue-file-meta">
+                        <File size={18} className="queue-file-icon" />
+                        <span className="queue-filename" title={item.file.name}>{item.file.name}</span>
+                        <span className="queue-filesize">{formatFileSize(item.file.size)}</span>
+                      </div>
+
+                      <div className="queue-card-right">
+                        <span className="queue-chunk-pill">
+                          <Lock size={10} />
+                          {chunksEst} {chunksEst === 1 ? 'chunk' : 'chunks'}
+                        </span>
+                        {item.status === 'pending' && !isUploading && (
+                          <button className="queue-remove-btn" onClick={(e) => { e.stopPropagation(); removeFile(index); }}>
+                            <X size={14} />
+                          </button>
+                        )}
+                        {item.status === 'done' && (
+                          <CheckCircle2 size={18} className="text-emerald" />
+                        )}
+                        {item.status === 'error' && (
+                          <span title={item.error}>
+                            <AlertCircle size={18} className="text-rose" />
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {item.status === 'uploading' && (
+                      <div className="queue-progress-bar-wrap">
+                        <div className="queue-progress-track">
+                          <div
+                            className="queue-progress-fill"
+                            style={{ width: `${item.progress}%` }}
+                          ></div>
+                        </div>
+                        <span className="queue-progress-pct">{item.progress}%</span>
+                      </div>
+                    )}
                   </div>
-                  <span className="upload-item-status">
-                    {item.status === 'pending' && 'Waiting'}
-                    {item.status === 'uploading' && `${item.progress}%`}
-                    {item.status === 'done' && '✅'}
-                    {item.status === 'error' && '❌'}
-                  </span>
-                </div>
-              </div>
-            ))}
+                );
+              })}
+            </div>
           </div>
         )}
 
-        <div className="modal-actions">
-          {!allDone && (
+        {/* Footer Actions */}
+        <div className="modal-footer-row">
+          <div className="footer-crypto-badge">
+            <Lock size={12} className="text-emerald" />
+            <span>Encrypted locally in RAM</span>
+          </div>
+
+          <div className="footer-button-group">
+            <button className="btn-secondary-glass" onClick={onClose} disabled={isUploading}>
+              Cancel
+            </button>
             <button
-              id="upload-start"
-              className="btn-primary"
+              className="btn-primary-gradient"
               onClick={startUpload}
-              disabled={!hasPending}
+              disabled={pendingCount === 0 || isUploading}
             >
-              {hasPending ? `Encrypt & Upload (${items.filter(i => i.status === 'pending').length})` : 'Uploading...'}
+              {isUploading ? (
+                <span className="flex-center-gap">
+                  <span className="spinner-border"></span>
+                  <span>Encrypting & Sending...</span>
+                </span>
+              ) : (
+                <span className="flex-center-gap">
+                  <Plus size={16} />
+                  <span>Upload {pendingCount > 0 ? `(${pendingCount})` : ''}</span>
+                </span>
+              )}
             </button>
-          )}
-          {allDone && (
-            <button id="upload-done" className="btn-primary" onClick={onClose}>
-              Done
-            </button>
-          )}
+          </div>
         </div>
       </div>
     </div>
