@@ -228,6 +228,15 @@ export default function Layout() {
       </header>
 
       <div className="vault-body-layout">
+        {/* Mobile Sidebar Overlay Backdrop */}
+        {sidebarOpen && (
+          <div
+            className="sidebar-backdrop"
+            onClick={() => setSidebarOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
         {/* Left Sidebar */}
         <aside className={`vault-sidebar ${sidebarOpen ? 'sidebar-visible' : ''}`}>
           {/* Action Buttons */}
