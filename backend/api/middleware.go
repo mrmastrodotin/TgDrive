@@ -173,7 +173,7 @@ func (s *Server) SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		// Prevent MIME type sniffing
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		// Prevent clickjacking
-		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		// XSS filter
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		// Referrer policy

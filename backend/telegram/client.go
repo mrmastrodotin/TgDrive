@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,13 +22,17 @@ type Client struct {
 
 // NewClient creates a new Telegram client with an optimized HTTP connection pool.
 func NewClient(token string, channelID int64) (*Client, error) {
-	// Custom HTTP transport with high connection pooling & HTTP/2 support
+	// Custom HTTP transport with high connection pooling
 	transport := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 50,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true, // Encrypted blobs cannot be compressed
-		ForceAttemptHTTP2:   true,
+		DisableCompression:  true,  // Encrypted blobs cannot be compressed
+		ForceAttemptHTTP2:   false, // HTTP/2 causes PROTOCOL_ERROR with Telegram CDN
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper), // Force HTTP/1.1
+		TLSClientConfig:     &tls.Config{
+			NextProtos: []string{"http/1.1"},
+		},
 	}
 
 	httpClient := &http.Client{
