@@ -10,6 +10,8 @@ export default defineConfig({
         target: 'https://localhost:8080',
         changeOrigin: true,
         secure: false,
+        timeout: 600000,       // 10 minutes — matches backend WriteTimeout
+        proxyTimeout: 600000,  // 10 minutes for Telegram chunk fetches
       },
     },
   },

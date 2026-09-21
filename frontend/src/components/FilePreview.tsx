@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   FileItem,
   getPreviewType,
   formatFileSize,
   PreviewableType,
 } from '../types';
-import { getStreamURL, getPreviewURL, downloadFile } from '../api/client';
+import { getStreamURL, getPreviewURL, downloadFile, warmupFile, getWarmupStatus } from '../api/client';
 import { marked } from 'marked';
 import {
   X,
@@ -36,6 +36,13 @@ import {
   VolumeX,
   Layers,
   ShieldCheck,
+  SkipBack,
+  SkipForward,
+  Maximize,
+  Minimize,
+  PictureInPicture2,
+  Info,
+  Tv,
 } from 'lucide-react';
 
 interface FilePreviewProps {
@@ -66,7 +73,23 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
 
   // Video state
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoPlaybackRate, setVideoPlaybackRate] = useState(1);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoBuffered, setVideoBuffered] = useState(0); // percentage 0-100
+  const [videoBufferedRanges, setVideoBufferedRanges] = useState<{ start: number; end: number }[]>([]);
+  const [videoVolume, setVideoVolume] = useState(1);
+  const [isVideoMuted, setIsVideoMuted] = useState(false);
+  const [isVideoFullscreen, setIsVideoFullscreen] = useState(false);
+  const [isTheaterMode, setIsTheaterMode] = useState(false);
+  const [showVideoControls, setShowVideoControls] = useState(true);
+  const [showStats, setShowStats] = useState(false);
+  const [scrubberHover, setScrubberHover] = useState<{ time: number; percent: number } | null>(null);
+  const [skipFlash, setSkipFlash] = useState<{ side: 'left' | 'right'; text: string } | null>(null);
+  const skipFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const videoControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Audio state
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -75,6 +98,77 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioVolume, setAudioVolume] = useState(1);
   const [isAudioMuted, setIsAudioMuted] = useState(false);
+  const [audioBuffered, setAudioBuffered] = useState(0); // percentage 0-100
+
+  // Warmup state — pre-fetches chunks before video/audio src is set
+  const [isWarming, setIsWarming] = useState(false);
+  const [warmupReady, setWarmupReady] = useState(false);
+  const [warmupProgress, setWarmupProgress] = useState('');
+  const warmupPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Multi-chunk detection: files > 20MB have multiple chunks
+  const isMultiChunk = file.size > 20 * 1024 * 1024;
+  const needsWarmup = (previewType === 'video' || previewType === 'audio') && isMultiChunk;
+
+  // Trigger warmup for multi-chunk media files
+  useEffect(() => {
+    if (!needsWarmup) {
+      setWarmupReady(true);
+      return;
+    }
+
+    let cancelled = false;
+    setIsWarming(true);
+    setWarmupProgress('Connecting to Telegram CDN...');
+
+    const startWarmup = async () => {
+      try {
+        const status = await warmupFile(file.id);
+        if (cancelled) return;
+
+        if (status.ready) {
+          setWarmupReady(true);
+          setIsWarming(false);
+          setWarmupProgress('');
+          return;
+        }
+
+        setWarmupProgress(`Buffering chunks: ${status.cached_count}/${status.total_chunks}`);
+
+        // Poll every 2 seconds until chunk 0 is cached
+        warmupPollRef.current = setInterval(async () => {
+          if (cancelled) return;
+          try {
+            const st = await getWarmupStatus(file.id);
+            if (cancelled) return;
+            setWarmupProgress(`Buffering chunks: ${st.cached_count}/${st.total_chunks}`);
+
+            if (st.ready) {
+              setWarmupReady(true);
+              setIsWarming(false);
+              setWarmupProgress('');
+              if (warmupPollRef.current) clearInterval(warmupPollRef.current);
+            }
+          } catch {
+            // Ignore poll errors
+          }
+        }, 2000);
+      } catch (err) {
+        if (cancelled) return;
+        // Warmup failed — try loading anyway (maybe it'll work with small latency)
+        console.warn('Warmup failed, loading directly:', err);
+        setWarmupReady(true);
+        setIsWarming(false);
+      }
+    };
+
+    startWarmup();
+
+    return () => {
+      cancelled = true;
+      if (warmupPollRef.current) clearInterval(warmupPollRef.current);
+    };
+  }, [file.id, needsWarmup]);
 
   // Keyboard close on Esc
   useEffect(() => {
@@ -260,15 +354,204 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
     }
   };
 
-  // Audio time format
+  // Time format (works for both audio and video)
   const formatTime = (seconds: number) => {
     if (isNaN(seconds) || seconds === 0) return '00:00';
-    const mins = Math.floor(seconds / 60);
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
+    if (hrs > 0) {
+      return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Audio play/pause
+  // Trigger temporary skip flash ripple (+10s / -10s)
+  const triggerSkipFlash = useCallback((side: 'left' | 'right', text: string) => {
+    if (skipFlashTimerRef.current) clearTimeout(skipFlashTimerRef.current);
+    setSkipFlash({ side, text });
+    skipFlashTimerRef.current = setTimeout(() => {
+      setSkipFlash(null);
+    }, 650);
+  }, []);
+
+  // Update buffered ranges for accurate YouTube-style multi-segment buffer bar
+  const updateVideoBufferInfo = useCallback((v: HTMLVideoElement) => {
+    if (!v.duration || v.buffered.length === 0) {
+      setVideoBuffered(0);
+      setVideoBufferedRanges([]);
+      return;
+    }
+    const ranges: { start: number; end: number }[] = [];
+    for (let i = 0; i < v.buffered.length; i++) {
+      ranges.push({
+        start: (v.buffered.start(i) / v.duration) * 100,
+        end: (v.buffered.end(i) / v.duration) * 100,
+      });
+    }
+    setVideoBufferedRanges(ranges);
+
+    // Active buffer progress for the current segment
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) {
+        setVideoBuffered((v.buffered.end(i) / v.duration) * 100);
+        return;
+      }
+    }
+    const lastEnd = v.buffered.end(v.buffered.length - 1);
+    setVideoBuffered((lastEnd / v.duration) * 100);
+  }, []);
+
+  // Get buffered percentage for audio
+  const getBufferedPercent = useCallback((media: HTMLMediaElement): number => {
+    if (!media.duration || media.buffered.length === 0) return 0;
+    for (let i = 0; i < media.buffered.length; i++) {
+      if (media.buffered.start(i) <= media.currentTime && media.currentTime <= media.buffered.end(i)) {
+        return (media.buffered.end(i) / media.duration) * 100;
+      }
+    }
+    const lastEnd = media.buffered.end(media.buffered.length - 1);
+    return (lastEnd / media.duration) * 100;
+  }, []);
+
+  // --- VIDEO CONTROLS ---
+  const toggleVideoPlay = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      v.play();
+    } else {
+      v.pause();
+    }
+  }, []);
+
+  const videoSeekBy = useCallback((delta: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
+    triggerSkipFlash(delta > 0 ? 'right' : 'left', `${delta > 0 ? '+' : ''}${delta}s`);
+  }, [triggerSkipFlash]);
+
+  const toggleVideoFullscreen = useCallback(async () => {
+    const container = videoContainerRef.current;
+    if (!container) return;
+    if (!document.fullscreenElement) {
+      await container.requestFullscreen().catch(() => {});
+    } else {
+      await document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  const togglePiP = useCallback(async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture().catch(() => {});
+    } else {
+      await v.requestPictureInPicture().catch(() => {});
+    }
+  }, []);
+
+  // Auto-hide video controls after 3 seconds of inactivity
+  const resetVideoControlsTimer = useCallback(() => {
+    setShowVideoControls(true);
+    if (videoControlsTimerRef.current) clearTimeout(videoControlsTimerRef.current);
+    videoControlsTimerRef.current = setTimeout(() => {
+      if (videoRef.current && !videoRef.current.paused) {
+        setShowVideoControls(false);
+      }
+    }, 3000);
+  }, []);
+
+  // Video keyboard controls (YouTube shortcuts)
+  useEffect(() => {
+    if (previewType !== 'video') return;
+    const handler = (e: KeyboardEvent) => {
+      const v = videoRef.current;
+      if (!v) return;
+      // Ignore if user is typing in an input
+      if ((e.target as HTMLElement).tagName === 'INPUT') return;
+
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        const pct = parseInt(e.key, 10) / 10;
+        v.currentTime = pct * (v.duration || 0);
+        triggerSkipFlash(pct > (v.currentTime / (v.duration || 1)) ? 'right' : 'left', `${pct * 100}%`);
+        return;
+      }
+
+      switch (e.key) {
+        case ' ':
+        case 'k':
+        case 'K':
+          e.preventDefault();
+          toggleVideoPlay();
+          break;
+        case 'ArrowLeft':
+        case 'j':
+        case 'J':
+          e.preventDefault();
+          videoSeekBy(-10);
+          break;
+        case 'ArrowRight':
+        case 'l':
+        case 'L':
+          e.preventDefault();
+          videoSeekBy(10);
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          v.volume = Math.min(1, v.volume + 0.1);
+          setVideoVolume(v.volume);
+          break;
+        case 'ArrowDown':
+          e.preventDefault();
+          v.volume = Math.max(0, v.volume - 0.1);
+          setVideoVolume(v.volume);
+          break;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          toggleVideoFullscreen();
+          break;
+        case 't':
+        case 'T':
+          e.preventDefault();
+          setIsTheaterMode((prev) => !prev);
+          break;
+        case 'i':
+        case 'I':
+          e.preventDefault();
+          togglePiP();
+          break;
+        case 'm':
+        case 'M':
+          e.preventDefault();
+          v.muted = !v.muted;
+          setIsVideoMuted(v.muted);
+          break;
+        case ',':
+          e.preventDefault();
+          v.currentTime = Math.max(0, v.currentTime - 1 / 30);
+          break;
+        case '.':
+          e.preventDefault();
+          v.currentTime = Math.min(v.duration || 0, v.currentTime + 1 / 30);
+          break;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [previewType, toggleVideoPlay, videoSeekBy, toggleVideoFullscreen, togglePiP, triggerSkipFlash]);
+
+  // Listen for fullscreen changes
+  useEffect(() => {
+    const handler = () => setIsVideoFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
+  // --- AUDIO CONTROLS ---
   const togglePlayAudio = () => {
     if (!audioRef.current) return;
     if (isPlayingAudio) {
@@ -343,36 +626,290 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
         );
 
       case 'video':
+        if (isWarming && !warmupReady) {
+          return (
+            <div className="preview-video-viewport">
+              <div className="video-warmup-overlay">
+                <div className="warmup-spinner" />
+                <p className="warmup-text">{warmupProgress || 'Preparing stream...'}</p>
+                <p className="warmup-subtext">Decrypting chunks from Telegram CDN</p>
+              </div>
+            </div>
+          );
+        }
         return (
-          <div className="preview-video-viewport">
-            <div className="video-player-container">
+          <div className={`preview-video-viewport ${isTheaterMode ? 'theater' : ''}`}>
+            <div
+              ref={videoContainerRef}
+              className={`video-player-container ${isVideoFullscreen ? 'fullscreen' : ''} ${isTheaterMode ? 'theater' : ''}`}
+              onMouseMove={resetVideoControlsTimer}
+              onMouseLeave={() => {
+                if (videoRef.current && !videoRef.current.paused) setShowVideoControls(false);
+              }}
+            >
               <video
                 ref={videoRef}
-                controls
-                autoPlay
                 playsInline
                 className="preview-video-element"
-              >
-                <source src={getStreamURL(file.id)} type={file.mime_type || 'video/mp4'} />
-                Your browser does not support HTML5 video streaming.
-              </video>
-              <div className="video-speed-bar">
-                <span className="speed-label">Speed:</span>
-                {[0.75, 1, 1.25, 1.5, 2].map((s) => (
-                  <button
-                    key={s}
-                    className={`speed-pill ${videoPlaybackRate === s ? 'active' : ''}`}
-                    onClick={() => handlePlaybackSpeed(s)}
-                  >
-                    {s}x
-                  </button>
-                ))}
+                src={getStreamURL(file.id)}
+                onPlay={() => { setIsVideoPlaying(true); resetVideoControlsTimer(); }}
+                onPause={() => { setIsVideoPlaying(false); setShowVideoControls(true); }}
+                onTimeUpdate={() => {
+                  const v = videoRef.current;
+                  if (v) {
+                    setVideoCurrentTime(v.currentTime);
+                    setVideoDuration(v.duration || 0);
+                    updateVideoBufferInfo(v);
+                  }
+                }}
+                onLoadedMetadata={() => {
+                  const v = videoRef.current;
+                  if (v) {
+                    setVideoDuration(v.duration || 0);
+                    v.play().catch(() => {});
+                  }
+                }}
+                onProgress={() => {
+                  const v = videoRef.current;
+                  if (v) updateVideoBufferInfo(v);
+                }}
+                onWaiting={() => setIsVideoPlaying(false)}
+                onCanPlay={() => {
+                  if (videoRef.current && !videoRef.current.paused) setIsVideoPlaying(true);
+                }}
+              />
+
+              {/* Gesture zones for YouTube-style double click seek & single click play/pause */}
+              <div className="video-gesture-overlay" onClick={toggleVideoPlay}>
+                <div
+                  className="video-gesture-side left"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    videoSeekBy(-10);
+                  }}
+                />
+                <div
+                  className="video-gesture-side right"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    videoSeekBy(10);
+                  }}
+                />
+              </div>
+
+              {/* YouTube-style skip animation ripple (+10s / -10s) */}
+              {skipFlash && (
+                <div className={`video-skip-flash-badge ${skipFlash.side}`}>
+                  <div className="skip-flash-inner">
+                    <span>{skipFlash.text}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Stats for Nerds card */}
+              {showStats && (
+                <div className="video-stats-card">
+                  <div className="stats-card-header">
+                    <span className="stats-title">Stats for Nerds</span>
+                    <button onClick={() => setShowStats(false)} className="stats-card-close">×</button>
+                  </div>
+                  <div className="stats-card-body">
+                    <div className="stats-row">
+                      <span className="stats-label">Resolution</span>
+                      <span className="stats-val">{videoRef.current ? `${videoRef.current.videoWidth} × ${videoRef.current.videoHeight}` : 'Loading'}</span>
+                    </div>
+                    <div className="stats-row">
+                      <span className="stats-label">Buffer Health</span>
+                      <span className="stats-val stats-highlight">
+                        {videoRef.current && videoDuration ? `${Math.max(0, (videoBuffered / 100) * videoDuration - videoCurrentTime).toFixed(1)}s ahead` : '0.0s'}
+                      </span>
+                    </div>
+                    <div className="stats-row">
+                      <span className="stats-label">Prefetch Engine</span>
+                      <span className="stats-val stats-highlight">Active (+2 Chunks ~40MB)</span>
+                    </div>
+                    <div className="stats-row">
+                      <span className="stats-label">Speed</span>
+                      <span className="stats-val">{videoPlaybackRate}x</span>
+                    </div>
+                    <div className="stats-row">
+                      <span className="stats-label">Encryption</span>
+                      <span className="stats-val">AES-256-GCM Streaming</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* YouTube-style overlay controls */}
+              <div className={`video-controls-overlay ${showVideoControls ? 'visible' : 'hidden'}`}>
+                {/* Progress bar with multi-segment buffer indicators and hover time tooltip */}
+                <div
+                  className="video-progress-bar-container"
+                  onMouseMove={(e) => {
+                    const v = videoRef.current;
+                    if (!v || !v.duration) return;
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                    setScrubberHover({
+                      time: ratio * v.duration,
+                      percent: ratio * 100,
+                    });
+                  }}
+                  onMouseLeave={() => setScrubberHover(null)}
+                  onClick={(e) => {
+                    const v = videoRef.current;
+                    if (!v || !v.duration) return;
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                    v.currentTime = ratio * v.duration;
+                  }}
+                >
+                  {/* Floating timestamp tooltip */}
+                  {scrubberHover && (
+                    <div
+                      className="video-scrubber-tooltip"
+                      style={{ left: `${scrubberHover.percent}%` }}
+                    >
+                      {formatTime(scrubberHover.time)}
+                    </div>
+                  )}
+
+                  {/* Background track */}
+                  <div className="video-progress-track" />
+
+                  {/* Multi-segment buffered bars (gray) — true YouTube buffer visualization */}
+                  {videoBufferedRanges.length > 0 ? (
+                    videoBufferedRanges.map((range, idx) => (
+                      <div
+                        key={idx}
+                        className="video-buffer-bar"
+                        style={{
+                          left: `${range.start}%`,
+                          width: `${Math.max(0, range.end - range.start)}%`,
+                        }}
+                      />
+                    ))
+                  ) : (
+                    <div className="video-buffer-bar" style={{ left: 0, width: `${videoBuffered}%` }} />
+                  )}
+
+                  {/* Played bar (red / accent cyan) */}
+                  <div
+                    className="video-played-bar"
+                    style={{ width: videoDuration ? `${(videoCurrentTime / videoDuration) * 100}%` : '0%' }}
+                  />
+
+                  {/* Scrubber dot */}
+                  <div
+                    className="video-scrubber-dot"
+                    style={{ left: videoDuration ? `${(videoCurrentTime / videoDuration) * 100}%` : '0%' }}
+                  />
+                </div>
+
+                {/* Bottom controls */}
+                <div className="video-controls-bottom">
+                  <div className="video-controls-left">
+                    <button className="video-ctrl-btn" onClick={toggleVideoPlay} title={isVideoPlaying ? 'Pause (K)' : 'Play (K)'}>
+                      {isVideoPlaying ? <Pause size={20} /> : <Play size={20} />}
+                    </button>
+                    <button className="video-ctrl-btn" onClick={() => videoSeekBy(-10)} title="Rewind 10s (J)">
+                      <SkipBack size={18} />
+                    </button>
+                    <button className="video-ctrl-btn" onClick={() => videoSeekBy(10)} title="Forward 10s (L)">
+                      <SkipForward size={18} />
+                    </button>
+
+                    {/* Volume */}
+                    <button
+                      className="video-ctrl-btn"
+                      onClick={() => {
+                        const v = videoRef.current;
+                        if (v) { v.muted = !v.muted; setIsVideoMuted(v.muted); }
+                      }}
+                      title="Mute (M)"
+                    >
+                      {isVideoMuted || videoVolume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                    </button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={isVideoMuted ? 0 : videoVolume}
+                      onChange={(e) => {
+                        const vol = parseFloat(e.target.value);
+                        setVideoVolume(vol);
+                        setIsVideoMuted(false);
+                        if (videoRef.current) { videoRef.current.volume = vol; videoRef.current.muted = false; }
+                      }}
+                      className="video-volume-slider"
+                    />
+
+                    <span className="video-time-display">
+                      {formatTime(videoCurrentTime)} / {formatTime(videoDuration)}
+                    </span>
+                  </div>
+
+                  <div className="video-controls-right">
+                    {/* Stats for nerds toggle */}
+                    <button
+                      className={`video-ctrl-btn ${showStats ? 'active' : ''}`}
+                      onClick={() => setShowStats((prev) => !prev)}
+                      title="Stats for Nerds"
+                    >
+                      <Info size={17} />
+                    </button>
+
+                    {/* Speed pills */}
+                    <div className="video-speed-bar">
+                      {[0.5, 0.75, 1, 1.25, 1.5, 2].map((s) => (
+                        <button
+                          key={s}
+                          className={`speed-pill ${videoPlaybackRate === s ? 'active' : ''}`}
+                          onClick={() => handlePlaybackSpeed(s)}
+                        >
+                          {s}x
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Picture in Picture */}
+                    <button className="video-ctrl-btn" onClick={togglePiP} title="Picture-in-Picture (I)">
+                      <PictureInPicture2 size={18} />
+                    </button>
+
+                    {/* Theater mode */}
+                    <button
+                      className={`video-ctrl-btn ${isTheaterMode ? 'active' : ''}`}
+                      onClick={() => setIsTheaterMode((prev) => !prev)}
+                      title="Theater Mode (T)"
+                    >
+                      <Tv size={18} />
+                    </button>
+
+                    {/* Fullscreen */}
+                    <button className="video-ctrl-btn" onClick={toggleVideoFullscreen} title="Fullscreen (F)">
+                      {isVideoFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         );
 
       case 'audio':
+        if (isWarming && !warmupReady) {
+          return (
+            <div className="preview-audio-viewport">
+              <div className="video-warmup-overlay">
+                <div className="warmup-spinner" />
+                <p className="warmup-text">{warmupProgress || 'Preparing audio stream...'}</p>
+                <p className="warmup-subtext">Decrypting chunks from Telegram CDN</p>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="preview-audio-viewport">
             <audio
@@ -382,11 +919,17 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
                 if (audioRef.current) {
                   setAudioProgress(audioRef.current.currentTime);
                   setAudioDuration(audioRef.current.duration || 0);
+                  setAudioBuffered(getBufferedPercent(audioRef.current));
                 }
               }}
               onLoadedMetadata={() => {
                 if (audioRef.current) {
                   setAudioDuration(audioRef.current.duration || 0);
+                }
+              }}
+              onProgress={() => {
+                if (audioRef.current) {
+                  setAudioBuffered(getBufferedPercent(audioRef.current));
                 }
               }}
               onEnded={() => setIsPlayingAudio(false)}
@@ -416,18 +959,22 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
                 </p>
               </div>
 
-              {/* Scrubber */}
+              {/* Scrubber with buffer bar */}
               <div className="audio-scrub-row">
                 <span className="audio-time-label">{formatTime(audioProgress)}</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={audioDuration || 100}
-                  step={0.1}
-                  value={audioProgress}
-                  onChange={handleAudioSeek}
-                  className="audio-seek-slider"
-                />
+                <div className="audio-progress-container">
+                  {/* Buffer bar (gray) */}
+                  <div className="audio-buffer-bar" style={{ width: `${audioBuffered}%` }} />
+                  <input
+                    type="range"
+                    min={0}
+                    max={audioDuration || 100}
+                    step={0.1}
+                    value={audioProgress}
+                    onChange={handleAudioSeek}
+                    className="audio-seek-slider"
+                  />
+                </div>
                 <span className="audio-time-label">{formatTime(audioDuration)}</span>
               </div>
 

@@ -34,5 +34,6 @@ frontend/.vite/
 # Database & Certificates
 *.db
 *.pem
+*.bin
 backend/*.db
 backend/*.pem

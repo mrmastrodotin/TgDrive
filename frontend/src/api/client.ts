@@ -139,19 +139,8 @@ export function getPreviewURL(fileId: string): string {
 }
 
 export async function downloadFile(fileId: string, filename: string): Promise<void> {
-  const token = getToken();
-  const res = await fetch(getDownloadURL(fileId), {
-    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-  });
-  if (!res.ok) throw new Error('Download failed');
-
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+  const url = getDownloadURL(fileId);
+  window.location.assign(url);
 }
 
 export async function deleteFile(id: string): Promise<void> {
@@ -162,5 +151,25 @@ export async function deleteFile(id: string): Promise<void> {
 export async function getFileInfo(id: string): Promise<FileItem> {
   const res = await fetchAPI(`/files/${id}/info`);
   if (!res.ok) throw new Error('File not found');
+  return res.json();
+}
+
+export interface WarmupStatus {
+  file_id: string;
+  total_chunks: number;
+  cached_chunks: number[];
+  cached_count: number;
+  ready: boolean;
+}
+
+export async function warmupFile(id: string): Promise<WarmupStatus> {
+  const res = await fetchAPI(`/files/${id}/warmup`, { method: 'POST' });
+  if (!res.ok) throw new Error('Warmup failed');
+  return res.json();
+}
+
+export async function getWarmupStatus(id: string): Promise<WarmupStatus> {
+  const res = await fetchAPI(`/files/${id}/warmup`);
+  if (!res.ok) throw new Error('Warmup status failed');
   return res.json();
 }

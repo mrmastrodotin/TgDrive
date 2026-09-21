@@ -8,26 +8,36 @@ import (
 	"strconv"
 	"strings"
 
+	"tgdrive/cache"
 	"tgdrive/config"
 	"tgdrive/storage"
 	"tgdrive/telegram"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // Server holds all dependencies for the HTTP API.
 type Server struct {
-	cfg *config.Config
-	db  *storage.DB
-	tg  *telegram.Client
-	mux *http.ServeMux
+	cfg         *config.Config
+	db          *storage.DB
+	tg          *telegram.Client
+	chunkCache  *cache.ChunkCache
+	chunkFlight singleflight.Group // Deduplicates concurrent downloads of the same chunk
+	mux         *http.ServeMux
 }
 
 // NewServer creates a new API server with all routes registered.
 func NewServer(cfg *config.Config, db *storage.DB, tg *telegram.Client) *Server {
+	// 256MB LRU cache — holds ~12 decrypted chunks in RAM
+	// Eliminates re-downloads from Telegram on audio seek / video scrub / PDF page turns
+	cc := cache.New(256 * 1024 * 1024)
+
 	s := &Server{
-		cfg: cfg,
-		db:  db,
-		tg:  tg,
-		mux: http.NewServeMux(),
+		cfg:        cfg,
+		db:         db,
+		tg:         tg,
+		chunkCache: cc,
+		mux:        http.NewServeMux(),
 	}
 
 	s.registerRoutes()
@@ -58,6 +68,8 @@ func (s *Server) registerRoutes() {
 	protected.HandleFunc("GET /api/files/{id}/stream", s.HandleStreamFile)
 	protected.HandleFunc("GET /api/files/{id}/preview", s.HandlePreviewFile)
 	protected.HandleFunc("GET /api/files/{id}/info", s.HandleGetFileInfo)
+	protected.HandleFunc("POST /api/files/{id}/warmup", s.HandleWarmupFile)
+	protected.HandleFunc("GET /api/files/{id}/warmup", s.HandleWarmupFile)
 	protected.HandleFunc("DELETE /api/files/{id}", s.HandleDeleteFile)
 
 	// Apply auth middleware to all /api/ routes except login
