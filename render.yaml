@@ -3,19 +3,21 @@ services:
     name: tgdrive
     runtime: docker
     plan: free
+    region: frankfurt
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
     envVars:
       - key: TG_BOT_TOKEN
         sync: false
       - key: TG_CHANNEL_ID
         sync: false
-      - key: ENCRYPTION_SECRET_KEY
+      - key: ENCRYPTION_SECRET
         sync: false
-      - key: TURSO_DATABASE_URL
+      - key: ADMIN_PASSWORD
         sync: false
-      - key: TURSO_AUTH_TOKEN
-        sync: false
-      - key: APP_PASSWORD
-        sync: false
+      - key: DATABASE_PATH
+        value: /app/data/tgdrive.db
       - key: PORT
         value: 8080
+      - key: ALLOWED_ORIGIN
+        value: "*"
