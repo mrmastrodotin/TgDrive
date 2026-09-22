@@ -1,0 +1,37 @@
+# Git
+.git
+.github
+.gitignore
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Documentation
+*.md
+LICENSE
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts & caches
+frontend/node_modules
+frontend/dist
+frontend/.vite
+backend/tmp
+backend/*.db
+backend/*.pem
+
+# Docker compose (not needed inside image)
+docker-compose.yml
+render.yaml
+
+# Test files
+*.bin

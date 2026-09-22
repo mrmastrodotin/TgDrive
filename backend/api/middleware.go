@@ -152,8 +152,14 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 }
 
 // ForceHTTPSMiddleware redirects all plain HTTP requests to HTTPS with a 301 Permanent Redirect.
+// Health check endpoint is excluded so cloud provider probes work on internal HTTP.
 func (s *Server) ForceHTTPSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip redirect for health probes (internal HTTP from Koyeb/Render LB)
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Detect plain HTTP behind edge proxies (Koyeb, Render, Cloudflare)
 		proto := r.Header.Get("X-Forwarded-Proto")
 		if proto == "http" {
