@@ -76,6 +76,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoPlaybackRate, setVideoPlaybackRate] = useState(1);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [isVideoBuffering, setIsVideoBuffering] = useState(false);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [videoBuffered, setVideoBuffered] = useState(0); // percentage 0-100
@@ -94,6 +95,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
   // Audio state
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [isAudioBuffering, setIsAudioBuffering] = useState(false);
   const [audioProgress, setAudioProgress] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [audioVolume, setAudioVolume] = useState(1);
@@ -110,7 +112,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
   const isMultiChunk = file.size > 20 * 1024 * 1024;
   const needsWarmup = (previewType === 'video' || previewType === 'audio') && isMultiChunk;
 
-  // Trigger warmup for multi-chunk media files
+  // Trigger warmup for multi-chunk media files (waits until at least 2 chunks are cached)
   useEffect(() => {
     if (!needsWarmup) {
       setWarmupReady(true);
@@ -119,12 +121,16 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
 
     let cancelled = false;
     setIsWarming(true);
-    setWarmupProgress('Connecting to Telegram CDN...');
+    const targetChunks = Math.min(2, Math.ceil(file.size / (20 * 1024 * 1024)));
+    setWarmupProgress(`Buffering initial chunks (0/${targetChunks})...`);
 
     const startWarmup = async () => {
       try {
         const status = await warmupFile(file.id);
         if (cancelled) return;
+
+        const target = Math.min(2, status.total_chunks);
+        const currentCached = Math.min(status.cached_count, target);
 
         if (status.ready) {
           setWarmupReady(true);
@@ -133,15 +139,17 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
           return;
         }
 
-        setWarmupProgress(`Buffering chunks: ${status.cached_count}/${status.total_chunks}`);
+        setWarmupProgress(`Buffering initial chunks (${currentCached}/${target})...`);
 
-        // Poll every 2 seconds until chunk 0 is cached
+        // Poll every 1 second until at least 2 chunks (~40MB) are cached
         warmupPollRef.current = setInterval(async () => {
           if (cancelled) return;
           try {
             const st = await getWarmupStatus(file.id);
             if (cancelled) return;
-            setWarmupProgress(`Buffering chunks: ${st.cached_count}/${st.total_chunks}`);
+            const tgt = Math.min(2, st.total_chunks);
+            const cnt = Math.min(st.cached_count, tgt);
+            setWarmupProgress(`Buffering initial chunks (${cnt}/${tgt})...`);
 
             if (st.ready) {
               setWarmupReady(true);
@@ -152,10 +160,10 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
           } catch {
             // Ignore poll errors
           }
-        }, 2000);
+        }, 1000);
       } catch (err) {
         if (cancelled) return;
-        // Warmup failed — try loading anyway (maybe it'll work with small latency)
+        // Warmup failed — fallback to direct loading
         console.warn('Warmup failed, loading directly:', err);
         setWarmupReady(true);
         setIsWarming(false);
@@ -168,7 +176,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
       cancelled = true;
       if (warmupPollRef.current) clearInterval(warmupPollRef.current);
     };
-  }, [file.id, needsWarmup]);
+  }, [file.id, file.size, needsWarmup]);
 
   // Keyboard close on Esc
   useEffect(() => {
@@ -428,6 +436,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
   const videoSeekBy = useCallback((delta: number) => {
     const v = videoRef.current;
     if (!v) return;
+    setIsVideoBuffering(true);
     v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + delta));
     triggerSkipFlash(delta > 0 ? 'right' : 'left', `${delta > 0 ? '+' : ''}${delta}s`);
   }, [triggerSkipFlash]);
@@ -475,6 +484,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
       if (e.key >= '0' && e.key <= '9') {
         e.preventDefault();
         const pct = parseInt(e.key, 10) / 10;
+        setIsVideoBuffering(true);
         v.currentTime = pct * (v.duration || 0);
         triggerSkipFlash(pct > (v.currentTime / (v.duration || 1)) ? 'right' : 'left', `${pct * 100}%`);
         return;
@@ -567,6 +577,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
     const val = parseFloat(e.target.value);
     setAudioProgress(val);
     if (audioRef.current) {
+      setIsAudioBuffering(true);
       audioRef.current.currentTime = val;
     }
   };
@@ -652,14 +663,38 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
                 playsInline
                 className="preview-video-element"
                 src={getStreamURL(file.id)}
-                onPlay={() => { setIsVideoPlaying(true); resetVideoControlsTimer(); }}
+                onPlay={() => { setIsVideoPlaying(true); setIsVideoBuffering(false); resetVideoControlsTimer(); }}
                 onPause={() => { setIsVideoPlaying(false); setShowVideoControls(true); }}
+                onSeeking={() => setIsVideoBuffering(true)}
+                onSeeked={() => {
+                  const v = videoRef.current;
+                  if (v && v.readyState >= 3) {
+                    setIsVideoBuffering(false);
+                  }
+                }}
+                onWaiting={() => setIsVideoBuffering(true)}
+                onStalled={() => {
+                  const v = videoRef.current;
+                  if (v && !v.paused) setIsVideoBuffering(true);
+                }}
+                onPlaying={() => {
+                  setIsVideoPlaying(true);
+                  setIsVideoBuffering(false);
+                }}
+                onCanPlay={() => {
+                  if (videoRef.current && !videoRef.current.paused) setIsVideoPlaying(true);
+                  setIsVideoBuffering(false);
+                }}
+                onCanPlayThrough={() => setIsVideoBuffering(false)}
                 onTimeUpdate={() => {
                   const v = videoRef.current;
                   if (v) {
                     setVideoCurrentTime(v.currentTime);
                     setVideoDuration(v.duration || 0);
                     updateVideoBufferInfo(v);
+                    if (isVideoBuffering && v.readyState >= 3) {
+                      setIsVideoBuffering(false);
+                    }
                   }
                 }}
                 onLoadedMetadata={() => {
@@ -673,11 +708,15 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
                   const v = videoRef.current;
                   if (v) updateVideoBufferInfo(v);
                 }}
-                onWaiting={() => setIsVideoPlaying(false)}
-                onCanPlay={() => {
-                  if (videoRef.current && !videoRef.current.paused) setIsVideoPlaying(true);
-                }}
               />
+
+              {/* Visible YouTube-style Buffering spinner when stalled or seeking */}
+              {isVideoBuffering && (
+                <div className="video-buffering-overlay" aria-live="polite">
+                  <div className="video-buffering-spinner" />
+                  <span className="video-buffering-text">Buffering...</span>
+                </div>
+              )}
 
               {/* Gesture zones for YouTube-style double click seek & single click play/pause */}
               <div className="video-gesture-overlay" onClick={toggleVideoPlay}>
@@ -761,6 +800,7 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
                     if (!v || !v.duration) return;
                     const rect = e.currentTarget.getBoundingClientRect();
                     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                    setIsVideoBuffering(true);
                     v.currentTime = ratio * v.duration;
                   }}
                 >
@@ -915,11 +955,35 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
             <audio
               ref={audioRef}
               src={getStreamURL(file.id)}
+              onPlay={() => { setIsPlayingAudio(true); setIsAudioBuffering(false); }}
+              onPause={() => setIsPlayingAudio(false)}
+              onSeeking={() => setIsAudioBuffering(true)}
+              onSeeked={() => {
+                const a = audioRef.current;
+                if (a && a.readyState >= 3) {
+                  setIsAudioBuffering(false);
+                }
+              }}
+              onWaiting={() => setIsAudioBuffering(true)}
+              onStalled={() => {
+                const a = audioRef.current;
+                if (a && !a.paused) setIsAudioBuffering(true);
+              }}
+              onPlaying={() => {
+                setIsPlayingAudio(true);
+                setIsAudioBuffering(false);
+              }}
+              onCanPlay={() => setIsAudioBuffering(false)}
+              onCanPlayThrough={() => setIsAudioBuffering(false)}
               onTimeUpdate={() => {
-                if (audioRef.current) {
-                  setAudioProgress(audioRef.current.currentTime);
-                  setAudioDuration(audioRef.current.duration || 0);
-                  setAudioBuffered(getBufferedPercent(audioRef.current));
+                const a = audioRef.current;
+                if (a) {
+                  setAudioProgress(a.currentTime);
+                  setAudioDuration(a.duration || 0);
+                  setAudioBuffered(getBufferedPercent(a));
+                  if (isAudioBuffering && a.readyState >= 3) {
+                    setIsAudioBuffering(false);
+                  }
                 }
               }}
               onLoadedMetadata={() => {
@@ -932,10 +996,21 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
                   setAudioBuffered(getBufferedPercent(audioRef.current));
                 }
               }}
-              onEnded={() => setIsPlayingAudio(false)}
+              onEnded={() => {
+                setIsPlayingAudio(false);
+                setIsAudioBuffering(false);
+              }}
             />
 
             <div className="audio-card-studio">
+              {/* Visible Buffering Overlay */}
+              {isAudioBuffering && (
+                <div className="audio-buffering-overlay" aria-live="polite">
+                  <div className="audio-buffering-spinner" />
+                  <span className="audio-buffering-text">Buffering...</span>
+                </div>
+              )}
+
               {/* Animated Waveform Equalizer */}
               <div className="audio-visual-wave">
                 {Array.from({ length: 28 }).map((_, i) => (
@@ -955,7 +1030,11 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
               <div className="audio-track-info">
                 <h4 className="audio-track-title">{file.name}</h4>
                 <p className="audio-track-meta">
-                  {formatFileSize(file.size)} • AES-256 Decrypted Telegram Stream
+                  {isAudioBuffering ? (
+                    <span className="audio-meta-buffering">Buffering stream from Telegram...</span>
+                  ) : (
+                    `${formatFileSize(file.size)} • AES-256 Decrypted Telegram Stream`
+                  )}
                 </p>
               </div>
 
@@ -980,8 +1059,14 @@ export default function FilePreview({ file, onClose }: FilePreviewProps) {
 
               {/* Controls */}
               <div className="audio-controls-row">
-                <button className="audio-play-btn" onClick={togglePlayAudio}>
-                  {isPlayingAudio ? <Pause size={24} /> : <Play size={24} className="ml-0-5" />}
+                <button className="audio-play-btn" onClick={togglePlayAudio} title={isPlayingAudio ? 'Pause' : 'Play'}>
+                  {isAudioBuffering ? (
+                    <div className="audio-btn-spinner" />
+                  ) : isPlayingAudio ? (
+                    <Pause size={24} />
+                  ) : (
+                    <Play size={24} className="ml-0-5" />
+                  )}
                 </button>
 
                 <div className="audio-volume-group">

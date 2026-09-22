@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -80,13 +81,24 @@ func (s *Server) registerRoutes() {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	// Serve frontend static files if directory exists (Docker / production)
-	fs := http.FileServer(http.Dir("./static"))
+	// Serve frontend static files with SPA fallback (Docker / production)
+	staticDir := "./static"
+	fs := http.FileServer(http.Dir(staticDir))
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Do not match /api
+		// Skip /api — those are handled by the protected mux
 		if strings.HasPrefix(r.URL.Path, "/api") {
 			http.NotFound(w, r)
 			return
+		}
+
+		// Check if the requested file exists on disk
+		path := staticDir + r.URL.Path
+		if r.URL.Path != "/" {
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				// SPA fallback: serve index.html for client-side routes
+				http.ServeFile(w, r, staticDir+"/index.html")
+				return
+			}
 		}
 		fs.ServeHTTP(w, r)
 	})

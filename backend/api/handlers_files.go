@@ -268,11 +268,27 @@ func (s *Server) HandleWarmupFile(w http.ResponseWriter, r *http.Request) {
 	derivedKey := crypto.DeriveKey(masterKey, salt)
 
 	// Check which chunks are already cached
+	cachedMap := make(map[int]bool)
 	cachedChunks := make([]int, 0)
 	for _, c := range chunks {
 		key := cache.Key(fileID, c.ChunkIndex)
 		if s.chunkCache.Get(key) != nil {
 			cachedChunks = append(cachedChunks, c.ChunkIndex)
+			cachedMap[c.ChunkIndex] = true
+		}
+	}
+
+	// Ready when at least 2 chunks (or all chunks if total < 2) are cached,
+	// ensuring chunks 0 and 1 are ready for instant playback and initial seeking (~40MB)
+	minRequired := 2
+	if len(chunks) < 2 {
+		minRequired = len(chunks)
+	}
+	ready := true
+	for i := 0; i < minRequired; i++ {
+		if !cachedMap[chunks[i].ChunkIndex] {
+			ready = false
+			break
 		}
 	}
 
@@ -285,7 +301,7 @@ func (s *Server) HandleWarmupFile(w http.ResponseWriter, r *http.Request) {
 		"total_chunks":  len(chunks),
 		"cached_chunks": cachedChunks,
 		"cached_count":  len(cachedChunks),
-		"ready":         len(cachedChunks) > 0, // chunk 0 is cached = ready to play
+		"ready":         ready,
 	})
 }
 

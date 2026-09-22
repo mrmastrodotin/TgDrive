@@ -2592,6 +2592,56 @@ body {
   font-weight: 600;
 }
 
+/* Visible YouTube-style Buffering Spinner Overlay */
+.video-buffering-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  pointer-events: none;
+  z-index: 30;
+  background: rgba(10, 14, 23, 0.75);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  padding: 20px 32px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  animation: fadeInBuffering 0.2s ease-out;
+}
+
+.video-buffering-spinner {
+  width: 44px;
+  height: 44px;
+  border: 3.5px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #38bdf8;
+  border-right-color: #0284c7;
+  border-radius: 50%;
+  animation: spinBuffering 0.8s linear infinite;
+}
+
+.video-buffering-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: #f1f5f9;
+  letter-spacing: 0.4px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+}
+
+@keyframes spinBuffering {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fadeInBuffering {
+  from { opacity: 0; transform: translate(-50%, -46%); }
+  to { opacity: 1; transform: translate(-50%, -50%); }
+}
+
 /* YouTube-style overlay controls */
 .video-controls-overlay {
   position: absolute;
@@ -2803,6 +2853,8 @@ body {
 }
 
 .audio-card-studio {
+  position: relative;
+  overflow: hidden;
   max-width: 480px;
   width: 100%;
   background: linear-gradient(135deg, rgba(20, 26, 42, 0.8), rgba(11, 15, 26, 0.95));
@@ -2813,6 +2865,61 @@ body {
   flex-direction: column;
   gap: 22px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7), 0 0 30px rgba(245, 158, 11, 0.1);
+}
+
+/* Audio Buffering Overlay */
+.audio-buffering-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(11, 15, 26, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: var(--radius-xl);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  z-index: 20;
+  pointer-events: none;
+  animation: fadeInBuffering 0.2s ease-out;
+}
+
+.audio-buffering-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3.5px solid rgba(255, 255, 255, 0.15);
+  border-top-color: #f59e0b;
+  border-right-color: #fbbf24;
+  border-radius: 50%;
+  animation: spinBuffering 0.8s linear infinite;
+}
+
+.audio-buffering-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f8fafc;
+  letter-spacing: 0.3px;
+}
+
+.audio-meta-buffering {
+  color: #f59e0b;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.audio-btn-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spinBuffering 0.8s linear infinite;
 }
 
 .audio-visual-wave {
