@@ -264,6 +264,9 @@ func (s *Server) HandleWarmupFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Del("X-Frame-Options")
+	w.Header().Del("Content-Security-Policy")
+
 	masterKey := []byte(s.cfg.MasterKey)
 	derivedKey := crypto.DeriveKey(masterKey, salt)
 
@@ -466,6 +469,9 @@ func (s *Server) HandleStreamFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Del("X-Frame-Options")
+	w.Header().Del("Content-Security-Policy")
+
 	masterKey := []byte(s.cfg.MasterKey)
 	derivedKey := crypto.DeriveKey(masterKey, salt)
 
@@ -638,6 +644,9 @@ func (s *Server) HandlePreviewFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "invalid salt"})
 		return
 	}
+
+	w.Header().Del("X-Frame-Options")
+	w.Header().Del("Content-Security-Policy")
 
 	masterKey := []byte(s.cfg.MasterKey)
 	derivedKey := crypto.DeriveKey(masterKey, salt)
