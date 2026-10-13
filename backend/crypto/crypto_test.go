@@ -79,3 +79,48 @@ func TestChunkAndEncryptReassemble(t *testing.T) {
 		t.Fatal("reconstructed payload does not match original")
 	}
 }
+
+func TestCredentialEncryptionAtRest(t *testing.T) {
+	secret := "my_dedicated_bot_credential_secret_32bytes!"
+	key := DeriveCredentialKey(secret)
+
+	rawToken := "123456789:ABCdefGHIjklMNOpqrsTUVwxyz_123456"
+
+	// 1. Encrypt token
+	encrypted, err := EncryptCredential(key, rawToken)
+	if err != nil {
+		t.Fatalf("EncryptCredential failed: %v", err)
+	}
+
+	if encrypted == rawToken {
+		t.Fatal("encrypted credential matches raw token")
+	}
+
+	// 2. Decrypt token
+	decrypted, err := DecryptCredential(key, encrypted)
+	if err != nil {
+		t.Fatalf("DecryptCredential failed: %v", err)
+	}
+
+	if decrypted != rawToken {
+		t.Fatalf("decrypted %s != expected %s", decrypted, rawToken)
+	}
+
+	// 3. Backward compatibility: plaintext legacy token should decrypt to itself
+	legacyPlain := "987654321:LEGACY_PLAINTEXT_TOKEN"
+	legacyDecrypted, err := DecryptCredential(key, legacyPlain)
+	if err != nil {
+		t.Fatalf("DecryptCredential on legacy plaintext failed: %v", err)
+	}
+	if legacyDecrypted != legacyPlain {
+		t.Fatalf("expected legacy plaintext to be returned as-is, got %s", legacyDecrypted)
+	}
+
+	// 4. Tampered ciphertext should fail GCM authentication
+	tampered := encrypted[:len(encrypted)-4] + "ffff"
+	_, err = DecryptCredential(key, tampered)
+	if err == nil {
+		t.Fatal("expected authentication failure on tampered credential")
+	}
+}
+

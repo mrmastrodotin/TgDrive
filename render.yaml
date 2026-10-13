@@ -13,7 +13,15 @@ services:
         sync: false
       - key: ENCRYPTION_SECRET
         sync: false
+      - key: BOT_CREDENTIAL_SECRET
+        sync: false
+      - key: JWT_SECRET
+        sync: false
       - key: ADMIN_PASSWORD
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
         sync: false
       - key: DATABASE_PATH
         value: /app/data/tgdrive.db

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,11 +29,30 @@ func main() {
 	}
 
 	// Initialize database
+	if strings.HasPrefix(cfg.TursoDatabaseURL, "libsql://") || strings.HasPrefix(cfg.TursoDatabaseURL, "https://") {
+		log.Printf("🗄️ Connecting to persistent Turso cloud database (%s)...", cfg.TursoDatabaseURL)
+	} else {
+		log.Printf("🗄️ Connecting to local SQLite database (%s)...", cfg.TursoDatabaseURL)
+	}
 	db, err := storage.New(cfg.TursoDatabaseURL, cfg.TursoAuthToken)
 	if err != nil {
 		log.Fatalf("FATAL: database: %v", err)
 	}
 	defer db.Close()
+	if strings.HasPrefix(cfg.TursoDatabaseURL, "libsql://") || strings.HasPrefix(cfg.TursoDatabaseURL, "https://") {
+		log.Println("✅ Persistent Turso cloud database connection verified")
+	} else {
+		log.Println("✅ Local SQLite database connection verified")
+	}
+
+	// Configure authenticated encryption at rest for Telegram bot credentials
+	if cfg.BotCredentialSecretIsFallback {
+		log.Println("⚠️ COMPATIBILITY WARNING: BOT_CREDENTIAL_SECRET is unset. Using legacy fallback to ENCRYPTION_SECRET in migration/compatibility mode. In production, configure a dedicated BOT_CREDENTIAL_SECRET.")
+	}
+	if cfg.JWTSecretIsFallback {
+		log.Println("⚠️ NOTICE: JWT_SECRET is unset. Deriving authentication token secret from ENCRYPTION_SECRET. For independent key rotation, configure a dedicated JWT_SECRET.")
+	}
+	db.SetCredentialKey(cfg.GetCredentialKey())
 
 	// Run migrations
 	ctx := context.Background()
@@ -41,11 +61,35 @@ func main() {
 	}
 	log.Println("✅ Database migrated")
 
-	// Initialize Telegram client
-	tg, err := telegram.NewClient(cfg.TGBotToken, cfg.TGChannelID)
-	if err != nil {
-		log.Fatalf("FATAL: telegram: %v", err)
+	// Migrate legacy unencrypted bot credentials to authenticated ciphertext at rest
+	if err := db.MigrateBotCredentials(ctx, cfg.GetCredentialKey()); err != nil {
+		log.Printf("⚠️ Bot credential migration: %v", err)
 	}
+
+	// Initialize Telegram Bot Pool
+	tg, err := telegram.NewBotPool(cfg.TGBotTokens, cfg.TGChannelID, cfg.TGServerURL)
+	if err != nil {
+		log.Fatalf("FATAL: telegram pool: %v", err)
+	}
+
+	// Load dynamically registered bots from DB into pool (failing safely if any cannot be decrypted)
+	dbBots, err := db.GetAllBots(ctx)
+	if err == nil {
+		for _, b := range dbBots {
+			if !b.Disabled {
+				if b.Token == "" {
+					displayHash := b.TokenHash
+					if len(displayHash) > 8 {
+						displayHash = displayHash[:8]
+					}
+					log.Printf("⚠️ WARNING: stored bot %s could not be decrypted; skipping pool registration safely", displayHash)
+					continue
+				}
+				_ = tg.AddBot(b.OwnerID, b.Token)
+			}
+		}
+	}
+
 
 	if err := tg.VerifyAccess(ctx); err != nil {
 		log.Fatalf("FATAL: telegram access: %v", err)

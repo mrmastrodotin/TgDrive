@@ -13,9 +13,10 @@ TgDrive is a self-hosted personal cloud storage platform that uses Telegram chan
           ▼
 ┌─────────────────────────────────────────┐
 │              Go Backend                 │
-│  - AES-256-GCM in-memory encryption     │
-│  - 20MB chunk pipeline                  │
+│  - AES-256-GCM storage encryption       │
+│  - 16MB chunk pipeline (CHUNK_SIZE)     │
 │  - PBKDF2 Key derivation per file       │
+│  - User-owned Telegram bot worker pools │
 │  - Range header byte seeking            │
 └──────────────────┬──────────────────────┘
                    │
@@ -28,8 +29,11 @@ TgDrive is a self-hosted personal cloud storage platform that uses Telegram chan
 └──────────────────┘  └──────────────────────┘
 ```
 
-- **Client-side & Server In-Memory Encryption:** Plaintext files are split into 20MB blocks and encrypted using AES-256-GCM before transmitting to Telegram. Telegram never receives unencrypted file names, raw data, or keys.
-- **Random Salt & IV per Chunk:** Unique IVs and PBKDF2-derived keys ensure no two chunks produce matching ciphertexts.
+- **Server-Side Authenticated Storage Encryption:** Plaintext files are transferred over TLS/HTTPS, split into 16MB blocks (`CHUNK_SIZE`), and encrypted using AES-256-GCM before transmitting to Telegram. Telegram never receives unencrypted file names, raw data, or keys.
+- **Dedicated Bot Credential Encryption at Rest:** Telegram bot tokens are encrypted at rest with AES-256-GCM using a dedicated `BOT_CREDENTIAL_SECRET` and indexed via cryptographic SHA-256 fingerprints. Raw tokens are never returned to clients or logged.
+- **Bot Worker Pools & Rotation:** Supports multiple bot tokens for parallel transfers. In-place token rotation preserves existing chunks, while distinct-bot replacements retain original credentials as download-only workers or migrate chunks via resumable ciphertext transfer (`POST /api/bots/{hash}/migrate`).
+- **Deployment Identity Model:** The production web deployment operates in **Single-User Administrator Mode** authenticated via `ADMIN_PASSWORD` (issuing administrative JWTs). While database schemas and bot pools enforce `owner_id` multi-tenant boundaries for architectural extensibility, self-service multi-user accounts are not exposed in the standalone production web UI.
+- **Deterministic Memory Budget & Admission Control:** Operations enforce resource-aware admission control against `MAX_MEMORY_BUDGET_BYTES`. Real-time Linux container RSS, cgroups (v1/v2), Go heap, and admission counters are exposed at `GET /api/system/memory`.
 - **HTTP Range Streaming:** Stream movies, audio, and large PDFs with random seek support directly in browser without downloading the full file first.
 - **Multi-File Sequential Uploads:** Upload entire folder structures with progress bars.
 
@@ -65,6 +69,7 @@ Edit `.env` with your credentials:
 TG_BOT_TOKEN=your_bot_token_from_botfather
 TG_CHANNEL_ID=-1001234567890
 ENCRYPTION_SECRET=your_super_strong_random_secret_at_least_32_characters
+BOT_CREDENTIAL_SECRET=dedicated_secret_for_bot_credentials_at_least_32_characters
 ADMIN_PASSWORD=your_dashboard_password
 PORT=8080
 DATABASE_PATH=tgdrive.db
@@ -98,6 +103,7 @@ docker run -d \
   -e TG_BOT_TOKEN="your_token" \
   -e TG_CHANNEL_ID="-1001234567890" \
   -e ENCRYPTION_SECRET="your_secret" \
+  -e BOT_CREDENTIAL_SECRET="your_bot_secret" \
   -e ADMIN_PASSWORD="your_password" \
   -v tgdrive_data:/app/data \
   --name tgdrive-app \
@@ -115,5 +121,6 @@ This repository includes a `render.yaml` configuration blueprint.
    - `TG_BOT_TOKEN`
    - `TG_CHANNEL_ID`
    - `ENCRYPTION_SECRET`
+   - `BOT_CREDENTIAL_SECRET`
    - `ADMIN_PASSWORD`
 4. Render automatically compiles the multi-stage Docker build and spins up the live service.

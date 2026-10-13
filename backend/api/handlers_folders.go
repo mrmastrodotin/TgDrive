@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"tgdrive/storage"
@@ -60,7 +61,7 @@ func (s *Server) HandleCreateFolder(w http.ResponseWriter, r *http.Request) {
 		Name     string  `json:"name"`
 		ParentID *string `json:"parent_id,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
@@ -83,6 +84,9 @@ func (s *Server) HandleCreateFolder(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	folderID := extractPathParam(r.URL.Path, "folders", "")
+	if folderID == "" {
+		folderID = r.PathValue("id")
+	}
 
 	folder, err := s.db.GetFolder(ctx, folderID)
 	if err != nil || folder == nil {
@@ -104,11 +108,14 @@ func (s *Server) HandleDeleteFolder(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleRenameFolder(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	folderID := extractPathParam(r.URL.Path, "folders", "")
+	if folderID == "" {
+		folderID = r.PathValue("id")
+	}
 
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil || req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
@@ -121,20 +128,26 @@ func (s *Server) HandleRenameFolder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "renamed"})
 }
 
-// deleteAllFilesInFolder removes Telegram messages for all files in a folder.
+// deleteAllFilesInFolder removes Telegram messages for all files in a folder and its subfolders.
 func (s *Server) deleteAllFilesInFolder(ctx context.Context, folderID string) {
 	files, err := s.db.ListFiles(ctx, &folderID)
-	if err != nil {
-		return
+	if err == nil {
+		for _, f := range files {
+			msgIDs, err := s.db.GetAllFileChunkTelegramMsgIDs(ctx, f.ID)
+			if err != nil {
+				continue
+			}
+			for _, msgID := range msgIDs {
+				_ = s.tg.DeleteMessage(ctx, msgID)
+			}
+		}
 	}
 
-	for _, f := range files {
-		msgIDs, err := s.db.GetAllFileChunkTelegramMsgIDs(ctx, f.ID)
-		if err != nil {
-			continue
-		}
-		for _, msgID := range msgIDs {
-			_ = s.tg.DeleteMessage(ctx, msgID)
+	// Recursively clean subfolders
+	subFolders, err := s.db.ListFolders(ctx, &folderID)
+	if err == nil {
+		for _, sf := range subFolders {
+			s.deleteAllFilesInFolder(ctx, sf.ID)
 		}
 	}
 }

@@ -1,3 +1,12 @@
+export interface FileMetadata {
+  duration?: number;
+  width?: number;
+  height?: number;
+  thumbnail_telegram_file_id?: string;
+  artist?: string;
+  title?: string;
+}
+
 export interface FileItem {
   id: string;
   name: string;
@@ -6,7 +15,12 @@ export interface FileItem {
   folder_id: string | null;
   encryption_salt: string;
   chunk_count: number;
+  chunk_size?: number;
+  owner_id?: string;
+  is_cinema?: boolean;
+  progress?: number;
   created_at: string;
+  metadata?: FileMetadata;
 }
 
 export interface FolderItem {
@@ -142,4 +156,44 @@ export function formatFileSize(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+export interface UploadSessionInitResponse {
+  upload_id: string;
+  file_id: string;
+  chunk_size: number;
+  total_chunks: number;
+  status: string;
+  safe_concurrency?: number;
+}
+
+export interface UploadStatusResponse {
+  upload_id: string;
+  file_id: string;
+  name: string;
+  size: number;
+  chunk_size: number;
+  total_chunks: number;
+  status: string;
+  source_fingerprint?: string;
+  confirmed_chunks: number[];
+  confirmed_count: number;
+  chunk_hashes?: Record<number, string>;
+  progress: number;
+  error_message?: string;
+}
+
+export interface BotWorkerStatus {
+  token_hash: string;
+  online: boolean;
+  disabled: boolean;
+  active_uploads: number;
+  cooldown_until?: string;
+}
+
+export interface BotPoolStatusResponse {
+  total: number;
+  online: number;
+  capacity?: number;
+  workers?: BotWorkerStatus[];
 }

@@ -37,3 +37,30 @@ frontend/.vite/
 *.bin
 backend/*.db
 backend/*.pem
+
+# Local test uploads & static build artifacts
+test_uploads/
+static/
+backend/static/
+
+# AI & Editor configurations
+.agents/
+.augment/
+.claude/
+.codebuddy/
+.codewhale/
+.continue/
+.cursor/
+.factory/
+.gemini/
+.github/prompts/
+.github/skills/
+.kilocode/
+.kiro/
+.opencode/
+.qoder/
+.roo/
+.trae/
+.warp/
+.windsurf/
+
