@@ -600,8 +600,13 @@ func (p *BotPool) DownloadChunk(ctx context.Context, fileID, botTokenHash string
 	worker, ok := p.workers[botTokenHash]
 	p.mu.Unlock()
 
-	if !ok {
-		return nil, fmt.Errorf("bot worker with hash %s not found in pool: telegram file_id is uniquely bound to the bot identity that uploaded it and cannot be downloaded by another bot. Register or retain the bot in the pool", botTokenHash)
+	if !ok || botTokenHash == "" {
+		// Fallback: try all bots in pool in case token was rotated, hash was legacy empty, or token hash changed
+		data, err := p.DownloadFileAnyBot(ctx, fileID)
+		if err == nil {
+			return data, nil
+		}
+		return nil, fmt.Errorf("bot worker with hash %s not found in pool: telegram file_id is uniquely bound to the bot identity that uploaded it. Tried all pool bots fallback: %w", botTokenHash, err)
 	}
 
 	file, err := worker.bot.GetFile(ctx, &bot.GetFileParams{
