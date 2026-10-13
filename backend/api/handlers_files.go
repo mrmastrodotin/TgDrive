@@ -42,7 +42,8 @@ func detectMimeType(filename, headerMime string) string {
 		".yml":   "text/yaml; charset=utf-8",
 		".toml":  "text/toml; charset=utf-8",
 		".xml":   "application/xml",
-		".html":  "text/html; charset=utf-8",
+		".html":  "text/plain; charset=utf-8",
+		".htm":   "text/plain; charset=utf-8",
 		".css":   "text/css; charset=utf-8",
 		".scss":  "text/x-scss; charset=utf-8",
 		".sql":   "text/x-sql; charset=utf-8",
@@ -224,32 +225,32 @@ func (s *Server) prefetchAhead(fileID string, chunks []storage.Chunk, currentIdx
 // This is called by the warmup endpoint so the browser's video element
 // never has to wait for cold Telegram downloads.
 func (s *Server) prefetchAllChunks(fileID string, chunks []storage.Chunk, derivedKey []byte) {
-	// Use a semaphore to limit concurrent Telegram downloads to 2
-	sem := make(chan struct{}, 2)
-	var wg sync.WaitGroup
+	// Entire prefetch runs asynchronously so the warmup handler returns immediately
+	go func() {
+		// Use a semaphore to limit concurrent Telegram downloads to 2
+		sem := make(chan struct{}, 2)
+		var wg sync.WaitGroup
 
-	for _, chunk := range chunks {
-		key := cache.Key(fileID, chunk.ChunkIndex)
-		if s.chunkCache.Get(key) != nil {
-			continue
+		for _, chunk := range chunks {
+			key := cache.Key(fileID, chunk.ChunkIndex)
+			if s.chunkCache.Get(key) != nil {
+				continue
+			}
+
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(c storage.Chunk) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				_, err := s.fetchChunkDecrypted(fileID, c, derivedKey)
+				if err != nil {
+					log.Printf("WARN: warmup chunk %d for %s failed: %v", c.ChunkIndex, fileID, err)
+				} else {
+					log.Printf("INFO: warmup chunk %d for %s cached", c.ChunkIndex, fileID)
+				}
+			}(chunk)
 		}
 
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(c storage.Chunk) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			_, err := s.fetchChunkDecrypted(fileID, c, derivedKey)
-			if err != nil {
-				log.Printf("WARN: warmup chunk %d for %s failed: %v", c.ChunkIndex, fileID, err)
-			} else {
-				log.Printf("INFO: warmup chunk %d for %s cached", c.ChunkIndex, fileID)
-			}
-		}(chunk)
-	}
-
-	// Don't block — let it finish in background
-	go func() {
 		wg.Wait()
 		log.Printf("INFO: warmup complete for file %s (%d chunks)", fileID, len(chunks))
 	}()
@@ -335,8 +336,9 @@ func (s *Server) HandleWarmupFile(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse multipart form"})
+	r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse multipart form or payload exceeds 512MB limit"})
 		return
 	}
 
@@ -605,6 +607,9 @@ func (s *Server) HandleStreamFile(w http.ResponseWriter, r *http.Request) {
 
 	streamMime := detectMimeType(dbFile.Name, dbFile.MimeType)
 	w.Header().Set("Content-Type", streamMime)
+	if strings.Contains(streamMime, "html") || strings.Contains(streamMime, "svg") || strings.Contains(streamMime, "xml") {
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	}
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	
@@ -879,6 +884,9 @@ func (s *Server) HandlePreviewFile(w http.ResponseWriter, r *http.Request) {
 	cleanFilename = strings.ReplaceAll(cleanFilename, "\n", "")
 	previewMime := detectMimeType(dbFile.Name, dbFile.MimeType)
 	w.Header().Set("Content-Type", previewMime)
+	if strings.Contains(previewMime, "html") || strings.Contains(previewMime, "svg") || strings.Contains(previewMime, "xml") {
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=%q; filename*=UTF-8''%s`, cleanFilename, url.PathEscape(cleanFilename)))
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Referrer-Policy", "no-referrer")
