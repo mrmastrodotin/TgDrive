@@ -110,6 +110,26 @@ func (c *ChunkCache) evictOldest() {
 	c.curBytes -= int64(len(entry.data))
 }
 
+// Clear removes all entries from the cache.
+func (c *ChunkCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*list.Element)
+	c.order.Init()
+	c.curBytes = 0
+}
+
+// Evict removes a specific key from the cache.
+func (c *ChunkCache) Evict(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[key]; ok {
+		entry := c.order.Remove(el).(*cacheEntry)
+		delete(c.items, key)
+		c.curBytes -= int64(len(entry.data))
+	}
+}
+
 // Stats returns current cache utilization.
 func (c *ChunkCache) Stats() (entries int, usedBytes, maxBytes int64) {
 	c.mu.Lock()

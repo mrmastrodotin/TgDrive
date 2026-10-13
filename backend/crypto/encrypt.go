@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -98,3 +99,78 @@ func HexEncode(data []byte) string {
 func HexDecode(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
+
+// DeriveCredentialKey derives a 256-bit AES key for credential encryption at rest.
+// Uses domain-separated PBKDF2 from a dedicated secret or master key.
+func DeriveCredentialKey(secret string) []byte {
+	salt := []byte("tgdrive:bot_credential_at_rest_v1")
+	return pbkdf2.Key([]byte(secret), salt, 100_000, 32, sha256.New)
+}
+
+// EncryptCredential encrypts a sensitive token string at rest using AES-256-GCM.
+// Formats the output as: enc:v1:<hex_iv>:<hex_ciphertext_and_tag>
+func EncryptCredential(key []byte, rawToken string) (string, error) {
+	if strings.HasPrefix(rawToken, "enc:v1:") {
+		return rawToken, nil // already encrypted
+	}
+
+	iv, err := GenerateIV()
+	if err != nil {
+		return "", fmt.Errorf("generate credential iv: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+
+	sealed := gcm.Seal(nil, iv, []byte(rawToken), nil)
+	return fmt.Sprintf("enc:v1:%s:%s", hex.EncodeToString(iv), hex.EncodeToString(sealed)), nil
+}
+
+// DecryptCredential decrypts a stored credential string.
+// If the token is legacy unencrypted plaintext, it returns it directly for backwards compatibility.
+func DecryptCredential(key []byte, stored string) (string, error) {
+	if !strings.HasPrefix(stored, "enc:v1:") {
+		// Legacy plaintext token
+		return stored, nil
+	}
+
+	parts := strings.Split(stored, ":")
+	if len(parts) != 4 {
+		return "", fmt.Errorf("invalid encrypted credential format")
+	}
+
+	iv, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return "", fmt.Errorf("decode credential iv: %w", err)
+	}
+
+	sealed, err := hex.DecodeString(parts[3])
+	if err != nil {
+		return "", fmt.Errorf("decode credential ciphertext: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("create GCM: %w", err)
+	}
+
+	plaintext, err := gcm.Open(nil, iv, sealed, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt credential: %w", err)
+	}
+
+	return string(plaintext), nil
+}
+

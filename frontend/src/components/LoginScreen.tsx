@@ -36,12 +36,16 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
       <div className="login-card-glass">
         <div className="vault-badge-header">
+          <div className="vault-security-chip">
+            <ShieldCheck size={12} />
+            <span>E2EE TELEGRAM VAULT</span>
+          </div>
           <div className="vault-icon-wrapper">
             <ShieldCheck className="vault-icon-svg" />
             <div className="vault-icon-pulse"></div>
           </div>
           <h1 className="vault-title">TgDrive</h1>
-          <p className="vault-tagline">Encrypted Personal Cloud Vault</p>
+          <p className="vault-tagline">Decentralized Cryptographic Storage Node</p>
         </div>
 
         <form onSubmit={handleSubmit} className="vault-form">
@@ -99,11 +103,11 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         <div className="vault-footer-security">
           <div className="security-pill">
             <span className="live-dot"></span>
-            <span>AES-256-GCM Military Grade</span>
+            <span>AES-256-GCM Storage Encryption</span>
           </div>
           <div className="security-pill">
-            <Sparkles size={13} className="text-accent" />
-            <span>Telegram Cloud Backbone</span>
+            <Sparkles size={13} className="text-accent-gold" />
+            <span>Telegram Bot Sharding Backbone</span>
           </div>
         </div>
       </div>

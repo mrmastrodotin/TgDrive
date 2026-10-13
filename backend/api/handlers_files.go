@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	"tgdrive/cache"
 	"tgdrive/crypto"
 	"tgdrive/storage"
+	"tgdrive/telegram"
 )
 
 // detectMimeType returns a precise MIME type for web browsers based on file extension and headers.
@@ -143,12 +147,23 @@ func (s *Server) fetchChunkDecrypted(fileID string, chunk storage.Chunk, derived
 			return nil, fmt.Errorf("decode auth tag chunk %d: %w", chunk.ChunkIndex, err)
 		}
 
+		// Check memory admission control with atomic in-flight reservation
+		releaseMem, err := s.ReserveMemory(int64(chunk.Size) * 2)
+		if err != nil {
+			return nil, fmt.Errorf("server memory budget exceeded: %w", err)
+		}
+		defer releaseMem()
+
+		// Enforce global download concurrency semaphore across all streams/downloads
+		s.downloadSem <- struct{}{}
+		defer func() { <-s.downloadSem }()
+
 		// Retry loop: 3 attempts with exponential backoff (2s, 4s, 8s)
 		var encData []byte
 		const maxRetries = 3
 		for attempt := 0; attempt < maxRetries; attempt++ {
 			tgCtx, tgCancel := telegramFetchContext()
-			encData, err = s.tg.DownloadChunk(tgCtx, chunk.TelegramFileID)
+			encData, err = s.tg.DownloadChunk(tgCtx, chunk.TelegramFileID, chunk.BotTokenHash)
 			tgCancel()
 
 			if err == nil {
@@ -166,6 +181,7 @@ func (s *Server) fetchChunkDecrypted(fileID string, chunk storage.Chunk, derived
 		}
 
 		plaintext, err := crypto.DecryptChunk(derivedKey, iv, encData, authTag)
+		encData = nil // Free ciphertext buffer immediately
 		if err != nil {
 			return nil, fmt.Errorf("decrypt chunk %d: %w", chunk.ChunkIndex, err)
 		}
@@ -245,10 +261,19 @@ func (s *Server) prefetchAllChunks(fileID string, chunks []storage.Chunk, derive
 // know when chunk 0 is ready before setting the video src.
 func (s *Server) HandleWarmupFile(w http.ResponseWriter, r *http.Request) {
 	fileID := extractPathParam(r.URL.Path, "files", "warmup")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
 
 	dbFile, err := s.db.GetFile(r.Context(), fileID)
 	if err != nil || dbFile == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
 		return
 	}
 
@@ -322,6 +347,19 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	var duration *float64
+	if d, err := strconv.ParseFloat(r.FormValue("duration"), 64); err == nil {
+		duration = &d
+	}
+	var width *int
+	if wVal, err := strconv.Atoi(r.FormValue("width")); err == nil {
+		width = &wVal
+	}
+	var height *int
+	if hVal, err := strconv.Atoi(r.FormValue("height")); err == nil {
+		height = &hVal
+	}
+
 	cleanName := filepath.Base(filepath.Clean(header.Filename))
 	cleanName = strings.ReplaceAll(cleanName, "\r", "")
 	cleanName = strings.ReplaceAll(cleanName, "\n", "")
@@ -352,29 +390,56 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	callerID := GetUserFromContext(ctx)
 	saltHex := crypto.HexEncode(salt)
-	dbFile, err := s.db.CreateFile(ctx, cleanName, header.Size, mimeType, folderIDPtr, saltHex, len(encChunks))
+	dbFile, err := s.db.CreateFile(ctx, cleanName, header.Size, mimeType, folderIDPtr, saltHex, len(encChunks), s.cfg.DefaultChunkSize, callerID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("database error: %v", err)})
 		return
 	}
 
-	for _, chunk := range encChunks {
-		chunkFilename := fmt.Sprintf("%s.chunk.%d", dbFile.ID, chunk.Index)
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(encChunks))
+	uploadResults := make([]*telegram.UploadResult, len(encChunks))
 
-		result, err := s.tg.UploadChunk(ctx, chunk.Data, chunkFilename)
-		if err != nil {
-			log.Printf("ERROR: upload chunk %d for file %s: %v", chunk.Index, dbFile.ID, err)
-			s.cleanupFailedUpload(dbFile.ID)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("telegram upload failed at chunk %d", chunk.Index)})
-			return
-		}
+	for i, chunk := range encChunks {
+		wg.Add(1)
+		go func(i int, chunk crypto.EncryptedChunk) {
+			defer wg.Done()
+			
+			// Use the global server semaphore to prevent "clumsy" overload when uploading multiple files at once
+			s.uploadSem <- struct{}{}
+			defer func() { <-s.uploadSem }()
 
+			chunkFilename := fmt.Sprintf("%s.chunk.%d", dbFile.ID, chunk.Index)
+			result, err := s.tg.UploadChunk(ctx, callerID, chunk.Data, chunkFilename)
+			if err != nil {
+				log.Printf("ERROR: upload chunk %d for file %s: %v", chunk.Index, dbFile.ID, err)
+				errCh <- fmt.Errorf("telegram upload failed at chunk %d", chunk.Index)
+				return
+			}
+			uploadResults[i] = result
+		}(i, chunk)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	if len(errCh) > 0 {
+		s.cleanupFailedUpload(dbFile.ID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to upload one or more chunks to Telegram"})
+		return
+	}
+
+	// Store metadata for all successfully uploaded chunks
+	for i, chunk := range encChunks {
+		res := uploadResults[i]
 		_, err = s.db.CreateChunk(ctx,
 			dbFile.ID,
 			chunk.Index,
-			result.MessageID,
-			result.FileID,
+			res.MessageID,
+			res.FileID,
+			res.BotTokenHash,
 			len(chunk.Data),
 			crypto.HexEncode(chunk.IV),
 			crypto.HexEncode(chunk.AuthTag),
@@ -387,6 +452,45 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 5. Upload Thumbnail if exists
+	var tFileID, tIV, tAuthTag *string
+	thumbFile, _, errThumb := r.FormFile("thumbnail")
+	if errThumb == nil {
+		defer thumbFile.Close()
+		thumbChunks, err := crypto.ChunkAndEncrypt(thumbFile, masterKey, salt)
+		if err == nil && len(thumbChunks) == 1 {
+			thumbChunk := thumbChunks[0]
+			res, err := s.tg.UploadChunk(ctx, callerID, thumbChunk.Data, dbFile.ID+".thumb")
+			if err == nil {
+				tf := res.FileID
+				iv := crypto.HexEncode(thumbChunk.IV)
+				auth := crypto.HexEncode(thumbChunk.AuthTag)
+				tFileID = &tf
+				tIV = &iv
+				tAuthTag = &auth
+			} else {
+				log.Printf("WARN: failed to upload thumbnail to telegram: %v", err)
+			}
+		}
+	}
+
+	// 6. Save Metadata to Turso
+	if duration != nil || width != nil || height != nil || tFileID != nil {
+		meta := &storage.FileMetadata{
+			Duration:                duration,
+			Width:                   width,
+			Height:                  height,
+			ThumbnailTelegramFileID: tFileID,
+			ThumbnailIV:             tIV,
+			ThumbnailAuthTag:        tAuthTag,
+		}
+		if err := s.db.SaveFileMetadata(ctx, dbFile.ID, meta); err != nil {
+			log.Printf("WARN: failed to save file metadata: %v", err)
+		} else {
+			dbFile.Metadata = meta
+		}
+	}
+
 	writeJSON(w, http.StatusOK, dbFile)
 }
 
@@ -394,10 +498,19 @@ func (s *Server) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 // Uses a detached context for Telegram fetches so browser timeouts don't kill the download pipeline.
 func (s *Server) HandleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	fileID := extractPathParam(r.URL.Path, "files", "download")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
 
 	dbFile, err := s.db.GetFile(r.Context(), fileID)
 	if err != nil || dbFile == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
 		return
 	}
 
@@ -421,9 +534,21 @@ func (s *Server) HandleDownloadFile(w http.ResponseWriter, r *http.Request) {
 		chunkMap[c.ChunkIndex] = c.TelegramFileID
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, dbFile.Name))
+	cleanFilename := filepath.Base(dbFile.Name)
+	cleanFilename = strings.ReplaceAll(cleanFilename, `"`, "")
+	cleanFilename = strings.ReplaceAll(cleanFilename, "\r", "")
+	cleanFilename = strings.ReplaceAll(cleanFilename, "\n", "")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q; filename*=UTF-8''%s`, cleanFilename, url.PathEscape(cleanFilename)))
 	w.Header().Set("Content-Type", dbFile.MimeType)
 	w.Header().Set("Content-Length", strconv.FormatInt(dbFile.Size, 10))
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	flushWriter(w)
 
@@ -453,10 +578,19 @@ func (s *Server) HandleDownloadFile(w http.ResponseWriter, r *http.Request) {
 // This is the critical path for audio/video playback and image/PDF loading.
 func (s *Server) HandleStreamFile(w http.ResponseWriter, r *http.Request) {
 	fileID := extractPathParam(r.URL.Path, "files", "stream")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
 
 	dbFile, err := s.db.GetFile(r.Context(), fileID)
 	if err != nil || dbFile == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
 		return
 	}
 
@@ -472,10 +606,10 @@ func (s *Server) HandleStreamFile(w http.ResponseWriter, r *http.Request) {
 	streamMime := detectMimeType(dbFile.Name, dbFile.MimeType)
 	w.Header().Set("Content-Type", streamMime)
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	
-	// Instruct the browser to aggressively cache the video/audio chunks
-	// This gives us the "+/- 5min" buffer effect for free.
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	// Private cache prevents public proxy caching of user files while allowing browser seeking cache
+	w.Header().Set("Cache-Control", "private, max-age=86400, no-transform")
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, dbFile.ID))
 
 	rangeHeader := r.Header.Get("Range")
@@ -491,13 +625,18 @@ func (s *Server) HandleStreamFile(w http.ResponseWriter, r *http.Request) {
 
 // streamFullFile streams the entire decrypted file to the client.
 func (s *Server) streamFullFile(w http.ResponseWriter, r *http.Request, dbFile *storage.File, fileID string, derivedKey []byte) {
+	w.Header().Set("Content-Length", strconv.FormatInt(dbFile.Size, 10))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	chunks, err := s.db.GetChunks(r.Context(), fileID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load chunks"})
 		return
 	}
 
-	w.Header().Set("Content-Length", strconv.FormatInt(dbFile.Size, 10))
 	w.WriteHeader(http.StatusOK)
 	flushWriter(w)
 
@@ -532,7 +671,14 @@ func (s *Server) streamRangeFile(w http.ResponseWriter, r *http.Request, dbFile 
 
 	contentLength := endByte - startByte + 1
 
-	chunks, offsetInFirst, err := s.db.GetChunksByRange(r.Context(), fileID, startByte, endByte)
+	// Historical legacy files always used fixed 20 MiB chunk boundaries (never variable ceil(size/count))
+	const LegacyChunkSize = 20 * 1024 * 1024
+	chunkSize := int64(dbFile.ChunkSize)
+	if chunkSize <= 0 {
+		chunkSize = LegacyChunkSize
+	}
+
+	chunks, offsetInFirst, err := s.db.GetChunksByRange(r.Context(), fileID, startByte, endByte, chunkSize)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load chunks"})
 		return
@@ -540,6 +686,12 @@ func (s *Server) streamRangeFile(w http.ResponseWriter, r *http.Request, dbFile 
 
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", startByte, endByte, dbFile.Size))
 	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusPartialContent)
+		return
+	}
+
 	w.WriteHeader(http.StatusPartialContent)
 	flushWriter(w)
 
@@ -570,12 +722,14 @@ func (s *Server) streamRangeFile(w http.ResponseWriter, r *http.Request, dbFile 
 			chunkEnd = chunkStart + remaining
 		}
 
-		n, err := w.Write(plaintext[chunkStart:chunkEnd])
-		if err != nil {
-			return
+		if chunkStart < chunkEnd {
+			n, err := w.Write(plaintext[chunkStart:chunkEnd])
+			if err != nil {
+				return
+			}
+			bytesWritten += int64(n)
+			flushWriter(w)
 		}
-		bytesWritten += int64(n)
-		flushWriter(w)
 
 		if bytesWritten >= contentLength {
 			break
@@ -587,10 +741,19 @@ func (s *Server) streamRangeFile(w http.ResponseWriter, r *http.Request, dbFile 
 func (s *Server) HandleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	fileID := extractPathParam(r.URL.Path, "files", "")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
 
 	dbFile, err := s.db.GetFile(ctx, fileID)
 	if err != nil || dbFile == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(ctx)
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
 		return
 	}
 
@@ -612,6 +775,9 @@ func (s *Server) HandleDeleteFile(w http.ResponseWriter, r *http.Request) {
 // HandleGetFileInfo handles GET /api/files/:id/info
 func (s *Server) HandleGetFileInfo(w http.ResponseWriter, r *http.Request) {
 	fileID := extractPathParam(r.URL.Path, "files", "info")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
 
 	dbFile, err := s.db.GetFile(r.Context(), fileID)
 	if err != nil || dbFile == nil {
@@ -619,17 +785,82 @@ func (s *Server) HandleGetFileInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, dbFile)
+}
+
+// HandleGetThumbnail handles GET /api/files/:id/thumbnail
+func (s *Server) HandleGetThumbnail(w http.ResponseWriter, r *http.Request) {
+	fileID := extractPathParam(r.URL.Path, "files", "thumbnail")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
+
+	dbFile, err := s.db.GetFile(r.Context(), fileID)
+	if err != nil || dbFile == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
+		return
+	}
+
+	meta := dbFile.Metadata
+	if meta == nil || meta.ThumbnailTelegramFileID == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "thumbnail not found"})
+		return
+	}
+
+	// Download the thumbnail chunk
+	chunkData, err := s.tg.DownloadFileAnyBot(r.Context(), *meta.ThumbnailTelegramFileID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to download thumbnail from telegram"})
+		return
+	}
+
+	// Decrypt
+	iv, _ := crypto.HexDecode(*meta.ThumbnailIV)
+	auth, _ := crypto.HexDecode(*meta.ThumbnailAuthTag)
+	salt, _ := crypto.HexDecode(dbFile.EncryptionSalt)
+	derivedKey := crypto.DeriveKey([]byte(s.cfg.MasterKey), salt)
+
+	plaintext, err := crypto.DecryptChunk(derivedKey, iv, chunkData, auth)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to decrypt thumbnail"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=86400, no-transform")
+	w.WriteHeader(http.StatusOK)
+	w.Write(plaintext)
 }
 
 // HandlePreviewFile handles GET /api/files/:id/preview — inline content for viewing.
 // Uses the stream handler internally since preview and stream have identical data flow.
 func (s *Server) HandlePreviewFile(w http.ResponseWriter, r *http.Request) {
 	fileID := extractPathParam(r.URL.Path, "files", "preview")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
 
 	dbFile, err := s.db.GetFile(r.Context(), fileID)
 	if err != nil || dbFile == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
 		return
 	}
 
@@ -642,10 +873,15 @@ func (s *Server) HandlePreviewFile(w http.ResponseWriter, r *http.Request) {
 	masterKey := []byte(s.cfg.MasterKey)
 	derivedKey := crypto.DeriveKey(masterKey, salt)
 
+	cleanFilename := filepath.Base(dbFile.Name)
+	cleanFilename = strings.ReplaceAll(cleanFilename, `"`, "")
+	cleanFilename = strings.ReplaceAll(cleanFilename, "\r", "")
+	cleanFilename = strings.ReplaceAll(cleanFilename, "\n", "")
 	previewMime := detectMimeType(dbFile.Name, dbFile.MimeType)
 	w.Header().Set("Content-Type", previewMime)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", dbFile.Name))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=%q; filename*=UTF-8''%s`, cleanFilename, url.PathEscape(cleanFilename)))
 	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 
 	// Check for range request (PDF viewers and browsers use these)
 	rangeHeader := r.Header.Get("Range")
@@ -668,5 +904,97 @@ func (s *Server) cleanupFailedUpload(fileID string) {
 		}
 	}
 	_ = s.db.DeleteFile(ctx, fileID)
+}
+
+// HandleGetStorageStats handles GET /api/stats
+func (s *Server) HandleGetStorageStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.db.GetStorageStats(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get storage stats"})
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// HandleSaveProgress handles POST /api/files/:id/progress
+func (s *Server) HandleSaveProgress(w http.ResponseWriter, r *http.Request) {
+	fileID := extractPathParam(r.URL.Path, "files", "progress")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
+
+	dbFile, err := s.db.GetFile(r.Context(), fileID)
+	if err != nil || dbFile == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
+		return
+	}
+
+	var req struct {
+		Progress float64 `json:"progress"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if err := s.db.SaveFileProgress(r.Context(), fileID, req.Progress); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save progress"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleSetCinema handles POST/PUT/DELETE /api/files/:id/cinema
+func (s *Server) HandleSetCinema(w http.ResponseWriter, r *http.Request) {
+	fileID := extractPathParam(r.URL.Path, "files", "cinema")
+	if fileID == "" {
+		fileID = r.PathValue("id")
+	}
+	if fileID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing file id"})
+		return
+	}
+
+	dbFile, err := s.db.GetFile(r.Context(), fileID)
+	if err != nil || dbFile == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	callerID := GetUserFromContext(r.Context())
+	if dbFile.OwnerID != "" && dbFile.OwnerID != callerID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "unauthorized file access"})
+		return
+	}
+
+	isCinema := true
+	if r.Method == http.MethodDelete {
+		isCinema = false
+	} else if r.Body != nil {
+		var req struct {
+			IsCinema *bool `json:"is_cinema"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err == nil && req.IsCinema != nil {
+			isCinema = *req.IsCinema
+		}
+	}
+
+	if err := s.db.SetFileCinema(r.Context(), fileID, isCinema); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update cinema status"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "ok",
+		"file_id":   fileID,
+		"is_cinema": isCinema,
+	})
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -30,14 +31,37 @@ type loginResponse struct {
 
 // Rate limiter for brute force protection
 type clientRate struct {
-	attempts int
+	attempts     int
 	blockedUntil time.Time
 }
+
+const maxLoginLimiterEntries = 5000
 
 var (
 	loginLimiter = make(map[string]*clientRate)
 	loginMu      sync.Mutex
 )
+
+// cleanupLoginLimiterLocked evicts expired rate-limit records to prevent unbounded memory growth.
+func cleanupLoginLimiterLocked(now time.Time) {
+	if len(loginLimiter) < maxLoginLimiterEntries {
+		return
+	}
+	// Evict entries whose block has expired and attempts reset
+	for k, v := range loginLimiter {
+		if now.After(v.blockedUntil) && v.attempts == 0 {
+			delete(loginLimiter, k)
+		}
+	}
+	// If still above capacity, evict any entry whose block has expired
+	if len(loginLimiter) >= maxLoginLimiterEntries {
+		for k, v := range loginLimiter {
+			if now.After(v.blockedUntil) {
+				delete(loginLimiter, k)
+			}
+		}
+	}
+}
 
 // HandleLogin validates the password and returns a JWT with brute-force rate limiting.
 func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
@@ -56,8 +80,10 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loginMu.Lock()
-	state, exists := loginLimiter[ip]
 	now := time.Now()
+	cleanupLoginLimiterLocked(now)
+
+	state, exists := loginLimiter[ip]
 	if !exists {
 		state = &clientRate{}
 		loginLimiter[ip] = state
@@ -98,8 +124,12 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	loginMu.Unlock()
 
 	expiresAt := time.Now().Add(24 * time.Hour)
+	// Single-User Mode: All direct password-authenticated sessions receive the "admin" identity.
+	// Architectural multi-user isolation is enforced whenever distinct Subject identities
+	// are supplied via external identity providers or tenant-scoped JWT tokens.
 	claims := AuthClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "admin",
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "tgdrive",
@@ -119,6 +149,23 @@ func (s *Server) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type contextKey string
+
+const userContextKey = contextKey("user_id")
+
+// GetUserFromContext extracts the authenticated user ID from context, defaulting to "admin".
+func GetUserFromContext(ctx context.Context) string {
+	if val, ok := ctx.Value(userContextKey).(string); ok && val != "" {
+		return val
+	}
+	return "admin"
+}
+
+// WithUserContext wraps a context with a specific user ID for tests or internal calls.
+func WithUserContext(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userContextKey, userID)
+}
+
 // AuthMiddleware validates JWT tokens on protected routes.
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,8 +173,13 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader != "" {
 			tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
-		} else if qToken := r.URL.Query().Get("token"); qToken != "" {
-			tokenStr = qToken
+		} else if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			// Query parameter token/ticket is permitted strictly on read-only media requests (e.g. native video/audio/img/a tags)
+			if qToken := r.URL.Query().Get("token"); qToken != "" {
+				tokenStr = qToken
+			} else if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+				tokenStr = ticket
+			}
 		}
 
 		if tokenStr == "" {
@@ -135,7 +187,8 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		token, err := jwt.ParseWithClaims(tokenStr, &AuthClaims{}, func(t *jwt.Token) (interface{}, error) {
+		claims := &AuthClaims{}
+		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
@@ -147,7 +200,34 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// If this is a scoped stream ticket, verify its audience matches the target route exactly
+		if len(claims.Audience) > 0 {
+			authorized := false
+			for _, aud := range claims.Audience {
+				parts := strings.SplitN(aud, ":", 2)
+				if len(parts) == 2 {
+					action := parts[0]
+					targetFileID := parts[1]
+					expectedPath := fmt.Sprintf("/api/files/%s/%s", targetFileID, action)
+					if r.URL.Path == expectedPath {
+						authorized = true
+						break
+					}
+				}
+			}
+			if !authorized {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "ticket audience not authorized for this resource"})
+				return
+			}
+		}
+
+		userID := "admin"
+		if claims.Subject != "" {
+			userID = claims.Subject
+		}
+
+		ctx := context.WithValue(r.Context(), userContextKey, userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -182,8 +262,12 @@ func (s *Server) SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		// XSS filter
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
-		// Referrer policy
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// Referrer policy: strictly no-referrer for sensitive media tickets and streams
+		if r.URL.Query().Get("ticket") != "" || r.URL.Query().Get("token") != "" || strings.Contains(r.URL.Path, "/stream") || strings.Contains(r.URL.Path, "/preview") {
+			w.Header().Set("Referrer-Policy", "no-referrer")
+		} else {
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		}
 		// Content-Security-Policy
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' blob: data:; media-src 'self' blob:; frame-src 'self' blob:;")
 
@@ -192,11 +276,18 @@ func (s *Server) SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		allowedOrigin := s.cfg.AllowedOrigin
 		if allowedOrigin == "*" {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-		} else if origin != "" && (origin == allowedOrigin || allowedOrigin == "*") {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		} else if origin != "" {
+			matched := false
+			for _, o := range strings.Split(allowedOrigin, ",") {
+				if strings.TrimSpace(o) == origin {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -212,3 +303,38 @@ func (s *Server) SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// RedactSensitiveURL redacts ticket and token parameters from a URL string for safe logging.
+func RedactSensitiveURL(rawURL string) string {
+	sensitiveParams := []string{"ticket", "token", "password", "key", "secret", "bot_token", "auth"}
+	hasSensitive := false
+	for _, p := range sensitiveParams {
+		if strings.Contains(strings.ToLower(rawURL), p+"=") {
+			hasSensitive = true
+			break
+		}
+	}
+	if !hasSensitive {
+		return rawURL
+	}
+	parts := strings.SplitN(rawURL, "?", 2)
+	if len(parts) != 2 {
+		return rawURL
+	}
+	base := parts[0]
+	qParts := strings.Split(parts[1], "&")
+	for i, qp := range qParts {
+		kv := strings.SplitN(qp, "=", 2)
+		if len(kv) == 2 {
+			k := strings.ToLower(kv[0])
+			for _, sp := range sensitiveParams {
+				if k == sp {
+					qParts[i] = kv[0] + "=[REDACTED]"
+					break
+				}
+			}
+		}
+	}
+	return base + "?" + strings.Join(qParts, "&")
+}
+

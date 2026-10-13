@@ -1,45 +1,38 @@
-import React, { useState, useRef, useCallback, useMemo } from 'react';
-import { uploadFile } from '../api/client';
+import React, { useState, useRef, useCallback } from 'react';
 import { formatFileSize } from '../types';
 import {
   UploadCloud,
   X,
   File,
-  CheckCircle2,
-  AlertCircle,
   Lock,
   Plus,
-  ArrowUpRight,
+  Trash2,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface UploadModalProps {
   folderId?: string;
   onClose: () => void;
-  onUploadComplete: () => void;
+  onStartUpload?: (files: File[]) => void;
+  onUploadComplete?: () => void;
 }
 
-interface UploadItem {
+interface StagedFile {
   file: File;
-  progress: number;
-  status: 'pending' | 'uploading' | 'done' | 'error';
-  error?: string;
-  startedAt?: number;      // timestamp when upload began
-  bytesLoaded?: number;    // bytes sent so far
+  id: string;
 }
 
-export default function UploadModal({ folderId, onClose, onUploadComplete }: UploadModalProps) {
-  const [items, setItems] = useState<UploadItem[]>([]);
+export default function UploadModal({ onClose, onStartUpload, onUploadComplete }: UploadModalProps) {
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = (files: FileList | File[]) => {
-    const newItems: UploadItem[] = Array.from(files).map((file) => ({
+    const newItems: StagedFile[] = Array.from(files).map((file) => ({
       file,
-      progress: 0,
-      status: 'pending' as const,
+      id: `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
     }));
-    setItems((prev) => [...prev, ...newItems]);
+    setStagedFiles((prev) => [...prev, ...newItems]);
   };
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -59,89 +52,68 @@ export default function UploadModal({ folderId, onClose, onUploadComplete }: Upl
     }
   }, []);
 
-  const removeFile = (index: number) => {
-    setItems((prev) => prev.filter((_, i) => i !== index));
+  const removeFile = (id: string) => {
+    setStagedFiles((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const formatETA = (seconds: number): string => {
-    if (!isFinite(seconds) || seconds < 0) return '';
-    if (seconds < 60) return `${Math.ceil(seconds)}s left`;
-    const m = Math.floor(seconds / 60);
-    const s = Math.ceil(seconds % 60);
-    if (m < 60) return `${m}m ${s}s left`;
-    const h = Math.floor(m / 60);
-    return `${h}h ${m % 60}m left`;
+  const clearAll = () => {
+    setStagedFiles([]);
   };
 
-  const formatSpeed = (bytesPerSec: number): string => {
-    if (bytesPerSec >= 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
-    if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
-    return `${bytesPerSec.toFixed(0)} B/s`;
-  };
-
-  const startUpload = async () => {
-    setIsUploading(true);
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].status !== 'pending') continue;
-
-      const startedAt = Date.now();
-      setItems((prev) => {
-        const next = [...prev];
-        next[i] = { ...next[i], status: 'uploading', startedAt, bytesLoaded: 0 };
-        return next;
-      });
-
-      try {
-        const fileSize = items[i].file.size;
-        await uploadFile(items[i].file, folderId, (percent) => {
-          const loaded = Math.round((percent / 100) * fileSize);
-          setItems((prev) => {
-            const next = [...prev];
-            next[i] = { ...next[i], progress: percent, bytesLoaded: loaded };
-            return next;
-          });
-        });
-
-        setItems((prev) => {
-          const next = [...prev];
-          next[i] = { ...next[i], status: 'done', progress: 100, bytesLoaded: fileSize };
-          return next;
-        });
-      } catch (err: any) {
-        setItems((prev) => {
-          const next = [...prev];
-          next[i] = {
-            ...next[i],
-            status: 'error',
-            error: err.message || 'Upload failed',
-          };
-          return next;
-        });
-      }
+  // Automatically start upload and hide the modal window
+  const handleUploadSubmit = () => {
+    if (stagedFiles.length === 0) return;
+    const filesToUpload = stagedFiles.map((item) => item.file);
+    if (onStartUpload) {
+      onStartUpload(filesToUpload);
     }
-    setIsUploading(false);
-    onUploadComplete();
+    if (onUploadComplete) {
+      onUploadComplete();
+    }
+    onClose(); // Auto-hides popup immediately!
   };
 
-  const pendingCount = items.filter((i) => i.status === 'pending').length;
-  const completedCount = items.filter((i) => i.status === 'done').length;
+  const totalSize = stagedFiles.reduce((acc, curr) => acc + curr.file.size, 0);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="upload-modal-glass" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header-bar">
-          <div className="modal-header-info">
-            <h3 className="modal-headline">Upload & Encrypt</h3>
-            <p className="modal-subline">Files are split into 20MB chunks and AES-256 encrypted before transmission</p>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-150"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-xl rounded-3xl bg-[#0f131c]/98 backdrop-blur-2xl border border-amber-500/25 p-6 md:p-7 flex flex-col gap-5 shadow-[0_25px_60px_rgba(0,0,0,0.85)] shadow-amber-500/5 animate-in zoom-in-95 duration-200"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Modal Header */}
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center shadow-[0_0_15px_rgba(252,186,105,0.2)]">
+              <UploadCloud size={22} />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-zinc-100 tracking-tight">Upload & Encrypt</h3>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                Files are 20MB chunked & AES-256 encrypted before transmission
+              </p>
+            </div>
           </div>
-          <button className="modal-close-btn" onClick={onClose} disabled={isUploading}>
-            <X size={20} />
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-white/10 transition-colors"
+          >
+            <X size={18} />
           </button>
         </div>
 
-        {/* Drop Zone */}
+        {/* Dropzone */}
         <div
-          className={`dropzone-glass ${isDragging ? 'dropzone-active' : ''}`}
+          className={`border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-all ${
+            isDragging
+              ? 'border-amber-400 bg-amber-500/10 shadow-[inset_0_0_25px_rgba(252,186,105,0.15)] scale-[1.01]'
+              : 'border-amber-500/30 bg-amber-500/[0.02] hover:border-amber-400/70 hover:bg-amber-500/[0.04]'
+          }`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -151,83 +123,78 @@ export default function UploadModal({ folderId, onClose, onUploadComplete }: Upl
             ref={fileInputRef}
             type="file"
             multiple
-            className="hidden-file-input"
+            className="hidden"
             onChange={(e) => e.target.files && addFiles(e.target.files)}
           />
-          <div className="dropzone-icon-glow">
-            <UploadCloud size={40} className="upload-cloud-icon" />
+          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto mb-3 shadow-[0_0_15px_rgba(252,186,105,0.15)]">
+            <UploadCloud size={24} />
           </div>
-          <h4 className="dropzone-prompt">Drag & Drop files here, or <span className="text-highlight">Browse</span></h4>
-          <p className="dropzone-hint">Supports all file types (4K video, documents, archives, audio, code)</p>
+          <h4 className="text-sm font-semibold text-zinc-100 mb-1">
+            Drag & drop files here, or{' '}
+            <span className="text-amber-400 underline underline-offset-4 hover:text-amber-300">
+              Browse
+            </span>
+          </h4>
+          <p className="text-xs text-zinc-400">
+            Supports 4K video, audio, archives, documents & code up to 2GB per file
+          </p>
         </div>
 
-        {/* Upload File Queue */}
-        {items.length > 0 && (
-          <div className="upload-queue-container">
-            <div className="queue-header">
-              <span className="queue-title">Selected Files ({items.length})</span>
-              <span className="queue-status-text">
-                {completedCount} of {items.length} uploaded
+        {/* Selected Files Queue */}
+        {stagedFiles.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs font-medium text-zinc-300 px-1">
+              <span>
+                Selected Files ({stagedFiles.length}) ·{' '}
+                <span className="text-amber-300 font-mono">{formatFileSize(totalSize)}</span>
               </span>
+              <button
+                type="button"
+                onClick={clearAll}
+                className="flex items-center gap-1 text-zinc-400 hover:text-rose-400 transition-colors"
+              >
+                <Trash2 size={12} />
+                <span>Clear</span>
+              </button>
             </div>
 
-            <div className="queue-list-scroll">
-              {items.map((item, index) => {
-                const chunksEst = Math.max(1, Math.ceil(item.file.size / (20 * 1024 * 1024)));
+            <div className="max-h-48 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+              {stagedFiles.map((item) => {
+                const chunksEst = Math.max(1, Math.ceil(item.file.size / (16 * 1024 * 1024)));
                 return (
-                  <div key={index} className={`queue-card ${item.status}`}>
-                    <div className="queue-card-top">
-                      <div className="queue-file-meta">
-                        <File size={18} className="queue-file-icon" />
-                        <span className="queue-filename" title={item.file.name}>{item.file.name}</span>
-                        <span className="queue-filesize">{formatFileSize(item.file.size)}</span>
-                      </div>
-
-                      <div className="queue-card-right">
-                        <span className="queue-chunk-pill">
-                          <Lock size={10} />
-                          {chunksEst} {chunksEst === 1 ? 'chunk' : 'chunks'}
-                        </span>
-                        {item.status === 'pending' && !isUploading && (
-                          <button className="queue-remove-btn" onClick={(e) => { e.stopPropagation(); removeFile(index); }}>
-                            <X size={14} />
-                          </button>
-                        )}
-                        {item.status === 'done' && (
-                          <CheckCircle2 size={18} className="text-emerald" />
-                        )}
-                        {item.status === 'error' && (
-                          <span title={item.error}>
-                            <AlertCircle size={18} className="text-rose" />
-                          </span>
-                        )}
+                  <div
+                    key={item.id}
+                    className="p-2.5 rounded-xl bg-white/[0.03] border border-white/5 flex items-center justify-between gap-3 hover:border-amber-500/20 transition-all"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <File size={16} className="text-amber-400 flex-shrink-0" />
+                      <div className="truncate">
+                        <p className="text-xs font-medium text-zinc-100 truncate" title={item.file.name}>
+                          {item.file.name}
+                        </p>
+                        <p className="text-[11px] text-zinc-400 font-mono">
+                          {formatFileSize(item.file.size)}
+                        </p>
                       </div>
                     </div>
 
-                    {item.status === 'uploading' && (() => {
-                      const elapsed = (Date.now() - (item.startedAt || Date.now())) / 1000;
-                      const speed = elapsed > 0.5 ? (item.bytesLoaded || 0) / elapsed : 0;
-                      const remaining = item.file.size - (item.bytesLoaded || 0);
-                      const eta = speed > 0 ? remaining / speed : 0;
-                      return (
-                        <div className="queue-progress-bar-wrap">
-                          <div className="queue-progress-track">
-                            <div
-                              className="queue-progress-fill"
-                              style={{ width: `${item.progress}%` }}
-                            ></div>
-                          </div>
-                          <div className="queue-progress-info">
-                            <span className="queue-progress-pct">{item.progress}%</span>
-                            {speed > 0 && (
-                              <span className="queue-progress-eta">
-                                {formatSpeed(speed)} · {formatETA(eta)}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()}
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="flex items-center gap-1 text-[10px] font-mono text-amber-300/80 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-md">
+                        <Lock size={10} />
+                        <span>
+                          {chunksEst} {chunksEst === 1 ? 'chunk' : 'chunks'}
+                        </span>
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => removeFile(item.id)}
+                        className="p-1 rounded-lg text-zinc-400 hover:text-rose-400 hover:bg-rose-500/15 transition-colors"
+                        title="Remove file"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
                   </div>
                 );
               })}
@@ -235,33 +202,36 @@ export default function UploadModal({ folderId, onClose, onUploadComplete }: Upl
           </div>
         )}
 
-        {/* Footer Actions */}
-        <div className="modal-footer-row">
-          <div className="footer-crypto-badge">
-            <Lock size={12} className="text-emerald" />
-            <span>Encrypted locally in RAM</span>
+        {/* Modal Footer */}
+        <div className="flex items-center justify-between pt-3 border-t border-white/10">
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <ShieldCheck size={14} className="text-emerald-400" />
+            <span>Encrypted in memory · Zero leaks</span>
           </div>
 
-          <div className="footer-button-group">
-            <button className="btn-secondary-glass" onClick={onClose} disabled={isUploading}>
+          <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-300 hover:text-white hover:bg-white/5 border border-white/10 transition-colors"
+            >
               Cancel
             </button>
+
             <button
-              className="btn-primary-gradient"
-              onClick={startUpload}
-              disabled={pendingCount === 0 || isUploading}
+              type="button"
+              onClick={handleUploadSubmit}
+              disabled={stagedFiles.length === 0}
+              className={`flex items-center gap-1.5 px-5 py-2 rounded-xl text-xs font-bold transition-all shadow-[0_0_15px_rgba(252,186,105,0.25)] ${
+                stagedFiles.length > 0
+                  ? 'bg-gradient-to-r from-amber-400 to-amber-600 hover:from-amber-300 hover:to-amber-500 text-black cursor-pointer'
+                  : 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-white/5'
+              }`}
             >
-              {isUploading ? (
-                <span className="flex-center-gap">
-                  <span className="spinner-border"></span>
-                  <span>Encrypting & Sending...</span>
-                </span>
-              ) : (
-                <span className="flex-center-gap">
-                  <Plus size={16} />
-                  <span>Upload {pendingCount > 0 ? `(${pendingCount})` : ''}</span>
-                </span>
-              )}
+              <Plus size={15} />
+              <span>
+                Upload {stagedFiles.length > 0 ? `(${stagedFiles.length})` : '& Encrypt'}
+              </span>
             </button>
           </div>
         </div>

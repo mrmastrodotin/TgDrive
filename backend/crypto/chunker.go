@@ -1,17 +1,29 @@
 package crypto
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
 )
 
 const (
-	// ChunkSize is 20MB raw data per chunk before encryption.
-	ChunkSize = 20 * 1024 * 1024
+	// SafeChunkSize is 16MB raw data per chunk, comfortably below Telegram's 20MB getFile limit.
+	SafeChunkSize = 16 * 1024 * 1024
+	// MaxChunkSize is the maximum permitted chunk size (20MB ceiling).
+	MaxChunkSize = 20 * 1024 * 1024
+	// ChunkSize defaults to SafeChunkSize for newly created single-part chunks.
+	ChunkSize = SafeChunkSize
 	// PrefetchWorkers defines how many chunks to download concurrently in advance
 	PrefetchWorkers = 3
 )
+
+// HashToken creates a short, deterministic hash of a Telegram bot token.
+func HashToken(token string) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
+}
 
 // EncryptedChunk holds one encrypted block and its associated crypto metadata.
 type EncryptedChunk struct {
