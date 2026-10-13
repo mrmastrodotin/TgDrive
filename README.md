@@ -5,6 +5,7 @@
 **Turn private Telegram channels into your personal, unlimited, encrypted cloud storage.**
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)](https://golang.org)
+[![Version](https://img.shields.io/badge/Release-v1--beta-orange?style=for-the-badge&logo=git)](https://github.com/mrmastrodotin/TgDrive/releases/tag/v1-beta)
 [![React](https://img.shields.io/badge/React-18-61DAFB?style=for-the-badge&logo=react)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org)
 [![Vite](https://img.shields.io/badge/Vite-6.0+-646CFF?style=for-the-badge&logo=vite)](https://vitejs.dev)
