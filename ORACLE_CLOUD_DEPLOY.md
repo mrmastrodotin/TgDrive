@@ -79,10 +79,11 @@ cd TgDrive
 
 # Configure environment variables
 cat << 'EOF' > .env
-TG_BOT_TOKEN=5436273775:AAHP93iP7ezv4UGwn_Mn4qwbckycLB0u68c
-TG_CHANNEL_ID=-1004364031474
-ENCRYPTION_SECRET=*#Srn*9778@mydb#
-ADMIN_PASSWORD=$@r@|\
+TG_BOT_TOKEN=your_telegram_bot_token_here
+TG_CHANNEL_ID=-1001234567890
+ENCRYPTION_SECRET=your_super_secure_random_secret_min_32_chars
+BOT_CREDENTIAL_SECRET=your_dedicated_bot_secret_min_32_chars
+ADMIN_PASSWORD=your_secure_admin_password
 PORT=8080
 DATABASE_PATH=/app/data/tgdrive.db
 ALLOWED_ORIGIN=*
@@ -101,4 +102,4 @@ Open your browser and navigate to:
 http://<YOUR_ORACLE_PUBLIC_IP>
 ```
 
-Log in using your admin password (`$@r@|\`). Your TgDrive is now running 24/7 on dedicated gigabit datacenter fiber with permanent free storage!
+Log in using your admin password. Your TgDrive is now running 24/7 on dedicated gigabit datacenter fiber with permanent free storage!
