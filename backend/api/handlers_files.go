@@ -658,10 +658,22 @@ func (s *Server) streamFullFile(w http.ResponseWriter, r *http.Request, dbFile *
 			return
 		}
 
-		if _, err := w.Write(plaintext); err != nil {
-			return
+		const writeBlockSize = 256 * 1024
+		for offset := 0; offset < len(plaintext); {
+			if isClientGone(r) {
+				return
+			}
+			end := offset + writeBlockSize
+			if end > len(plaintext) {
+				end = len(plaintext)
+			}
+			n, err := w.Write(plaintext[offset:end])
+			if err != nil {
+				return
+			}
+			offset += n
+			flushWriter(w)
 		}
-		flushWriter(w)
 	}
 }
 
@@ -728,12 +740,24 @@ func (s *Server) streamRangeFile(w http.ResponseWriter, r *http.Request, dbFile 
 		}
 
 		if chunkStart < chunkEnd {
-			n, err := w.Write(plaintext[chunkStart:chunkEnd])
-			if err != nil {
-				return
+			subSlice := plaintext[chunkStart:chunkEnd]
+			const writeBlockSize = 256 * 1024
+			for offset := 0; offset < len(subSlice); {
+				if isClientGone(r) {
+					return
+				}
+				end := offset + writeBlockSize
+				if end > len(subSlice) {
+					end = len(subSlice)
+				}
+				n, err := w.Write(subSlice[offset:end])
+				if err != nil {
+					return
+				}
+				offset += n
+				bytesWritten += int64(n)
+				flushWriter(w)
 			}
-			bytesWritten += int64(n)
-			flushWriter(w)
 		}
 
 		if bytesWritten >= contentLength {

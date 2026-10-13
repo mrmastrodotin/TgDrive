@@ -62,7 +62,7 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [isVideoBuffering, setIsVideoBuffering] = useState(false);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
-  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(file.metadata?.duration || 0);
   const [videoBuffered, setVideoBuffered] = useState(0);
   const [videoBufferedRanges, setVideoBufferedRanges] = useState<{ start: number; end: number }[]>([]);
   const [videoVolume, setVideoVolume] = useState(1);
@@ -258,10 +258,12 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
   const videoSeekBy = useCallback((sec: number) => {
     const v = videoRef.current;
     if (!v) return;
+    const dur = v.duration || videoDuration || file.metadata?.duration || 0;
+    if (dur <= 0) return;
     setIsVideoBuffering(true);
-    v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + sec));
+    v.currentTime = Math.max(0, Math.min(dur, v.currentTime + sec));
     triggerSkipFlash(sec > 0 ? 'right' : 'left', `${Math.abs(sec)}s`);
-  }, [triggerSkipFlash]);
+  }, [triggerSkipFlash, videoDuration, file.metadata?.duration]);
 
   const handlePlaybackSpeed = (speed: number) => {
     setVideoPlaybackRate(speed);
@@ -290,9 +292,11 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
       if (e.key >= '0' && e.key <= '9') {
         e.preventDefault();
         const pct = parseInt(e.key, 10) / 10;
+        const dur = v.duration || videoDuration || file.metadata?.duration || 0;
+        if (dur <= 0) return;
         setIsVideoBuffering(true);
-        v.currentTime = pct * (v.duration || 0);
-        triggerSkipFlash(pct > (v.currentTime / (v.duration || 1)) ? 'right' : 'left', `${pct * 100}%`);
+        v.currentTime = pct * dur;
+        triggerSkipFlash(pct > (v.currentTime / dur) ? 'right' : 'left', `${pct * 100}%`);
         return;
       }
 
@@ -606,22 +610,24 @@ export const VideoPreview: React.FC<VideoPreviewProps> = ({
             className="video-progress-bar-container"
             onMouseMove={(e) => {
               const v = videoRef.current;
-              if (!v || !v.duration) return;
+              const dur = v?.duration || videoDuration || file.metadata?.duration || 0;
+              if (!v || dur <= 0) return;
               const rect = e.currentTarget.getBoundingClientRect();
               const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
               setScrubberHover({
-                time: ratio * v.duration,
+                time: ratio * dur,
                 percent: ratio * 100,
               });
             }}
             onMouseLeave={() => setScrubberHover(null)}
             onClick={(e) => {
               const v = videoRef.current;
-              if (!v || !v.duration) return;
+              const dur = v?.duration || videoDuration || file.metadata?.duration || 0;
+              if (!v || dur <= 0) return;
               const rect = e.currentTarget.getBoundingClientRect();
               const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
               setIsVideoBuffering(true);
-              v.currentTime = ratio * v.duration;
+              v.currentTime = ratio * dur;
             }}
           >
             {scrubberHover && (
